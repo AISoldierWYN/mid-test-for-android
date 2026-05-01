@@ -20,6 +20,13 @@ export {
   locateAndroidElementByPrompt,
   locateAndroidElementWithScore,
 } from './fast-locator';
+export {
+  AndroidHelperClient,
+  DEFAULT_ANDROID_HELPER_ENDPOINT,
+  DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT,
+  DEFAULT_ANDROID_HELPER_LOCAL_PORT,
+  DEFAULT_ANDROID_HELPER_TIMEOUT_MS,
+} from './helper-client';
 export type {
   AndroidActionStep,
   AndroidDiagnosticsOptions,
@@ -34,3 +41,25 @@ export type {
   AndroidFastLocatorMatch,
   AndroidFastLocatorOptions,
 } from './fast-locator';
+export type {
+  AndroidHelperAppCommand,
+  AndroidHelperAppResult,
+  AndroidHelperClientOptions,
+  AndroidHelperCoordinateSpace,
+  AndroidHelperEnvelope,
+  AndroidHelperEventRequest,
+  AndroidHelperEventResult,
+  AndroidHelperForegroundState,
+  AndroidHelperGuardState,
+  AndroidHelperInputAction,
+  AndroidHelperInputRequest,
+  AndroidHelperInputResult,
+  AndroidHelperIssueState,
+  AndroidHelperLogRequest,
+  AndroidHelperLogResult,
+  AndroidHelperOverlayState,
+  AndroidHelperScreenshot,
+  AndroidHelperSnapshot,
+  AndroidHelperSnapshotPart,
+  AndroidHelperSnapshotRequest,
+} from './helper-client';

@@ -60,9 +60,20 @@ import {
   type AndroidDiagnosticsSnapshot,
   type AndroidForegroundState,
   type AndroidTimingCategory,
+  createPageFingerprint,
   parseForegroundState,
 } from './diagnostics';
 import { locateAndroidElementByPrompt } from './fast-locator';
+import {
+  type AndroidHelperAppCommand,
+  AndroidHelperClient,
+  type AndroidHelperInputAction,
+  type AndroidHelperSnapshot,
+  type AndroidHelperSnapshotPart,
+  DEFAULT_ANDROID_HELPER_ENDPOINT,
+  DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT,
+  DEFAULT_ANDROID_HELPER_LOCAL_PORT,
+} from './helper-client';
 import {
   type DevicePhysicalInfo,
   ScrcpyDeviceAdapter,
@@ -88,6 +99,12 @@ const defaultNormalScrollDuration = 1000;
 const IME_STRATEGY_ALWAYS_YADB = 'always-yadb' as const;
 const IME_STRATEGY_YADB_FOR_NON_ASCII = 'yadb-for-non-ascii' as const;
 type ScrollDirection = 'up' | 'down' | 'left' | 'right';
+type AndroidHelperDeviceOpt = NonNullable<
+  Exclude<AndroidDeviceOpt['helper'], boolean>
+>;
+type AndroidHelperAdbForwardOpt = NonNullable<
+  Exclude<AndroidHelperDeviceOpt['adbForward'], boolean>
+>;
 
 const debugDevice = getDebug('android:device');
 const warnDevice = getDebug('android:device', { console: true });
@@ -134,6 +151,10 @@ export class AndroidDevice implements AbstractInterface {
   private cachedAdjustScale: { x: number; y: number } | null = null;
   private takeScreenshotFailCount = 0;
   private readonly diagnostics: AndroidDiagnosticsRecorder;
+  private helperClient: AndroidHelperClient | null = null;
+  private helperForwardPromise: Promise<void> | null = null;
+  private helperUnavailable = false;
+  private helperUnavailableLogged = false;
   private static readonly TAKE_SCREENSHOT_FAIL_THRESHOLD = 3;
   interfaceType: InterfaceType = 'android';
   uri: string | undefined;
@@ -651,6 +672,153 @@ ${Object.keys(size)
     this.diagnostics.reset();
   }
 
+  public async getAndroidHelperSnapshot(
+    include: AndroidHelperSnapshotPart[] = [
+      'screenshot',
+      'uiTree',
+      'foreground',
+      'keyboard',
+      'guard',
+    ],
+  ): Promise<AndroidHelperSnapshot | null> {
+    return (
+      (await this.tryHelperRequest('snapshot', async (client) =>
+        client.snapshot({ include }),
+      )) ?? null
+    );
+  }
+
+  private getHelperOptions(): AndroidHelperDeviceOpt | null {
+    const helper = this.options?.helper;
+    if (!helper) {
+      return null;
+    }
+    if (helper === true) {
+      return {};
+    }
+    if (helper.enabled === false) {
+      return null;
+    }
+    return helper;
+  }
+
+  private getHelperClient(): AndroidHelperClient | null {
+    const options = this.getHelperOptions();
+    if (!options) {
+      return null;
+    }
+    if (!this.helperClient) {
+      this.helperClient = new AndroidHelperClient({
+        endpoint: this.getHelperEndpoint(options),
+        timeoutMs: options.timeoutMs,
+      });
+    }
+    return this.helperClient;
+  }
+
+  private getHelperEndpoint(options: AndroidHelperDeviceOpt): string {
+    if (options?.endpoint) {
+      return options.endpoint;
+    }
+
+    const forward = this.getHelperForwardOptions(options);
+    if (!forward) {
+      return DEFAULT_ANDROID_HELPER_ENDPOINT;
+    }
+
+    const port = forward?.localPort ?? DEFAULT_ANDROID_HELPER_LOCAL_PORT;
+    return `http://127.0.0.1:${port}`;
+  }
+
+  private getHelperForwardOptions(
+    options: AndroidHelperDeviceOpt | null,
+  ): AndroidHelperAdbForwardOpt | null {
+    const forward = options?.adbForward;
+    if (!forward) {
+      return null;
+    }
+    if (forward === true) {
+      return {};
+    }
+    return forward;
+  }
+
+  private async ensureHelperForward(): Promise<void> {
+    const options = this.getHelperOptions();
+    const forward = this.getHelperForwardOptions(options);
+    if (!forward) {
+      return;
+    }
+
+    if (!this.helperForwardPromise) {
+      this.helperForwardPromise = (async () => {
+        const adb = await this.getAdb();
+        const localPort =
+          forward.localPort ?? DEFAULT_ANDROID_HELPER_LOCAL_PORT;
+        if (forward.remotePort !== undefined) {
+          await adb.forwardPort(localPort, forward.remotePort);
+          return;
+        }
+        await adb.forwardAbstractPort(
+          localPort,
+          forward.localAbstractName ?? DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT,
+        );
+      })();
+    }
+    await this.helperForwardPromise;
+  }
+
+  private async tryHelperRequest<T>(
+    operation: string,
+    request: (client: AndroidHelperClient) => Promise<T>,
+  ): Promise<T | undefined> {
+    if (this.helperUnavailable) {
+      return undefined;
+    }
+
+    const options = this.getHelperOptions();
+    if (!options) {
+      return undefined;
+    }
+
+    const client = this.getHelperClient();
+    if (!client) {
+      return undefined;
+    }
+
+    try {
+      await this.ensureHelperForward();
+      return await request(client);
+    } catch (error) {
+      return this.handleHelperFailure(operation, error);
+    }
+  }
+
+  private handleHelperFailure<T>(
+    operation: string,
+    error: unknown,
+  ): T | undefined {
+    const options = this.getHelperOptions();
+    const message = error instanceof Error ? error.message : String(error);
+    if (options?.failOnUnavailable) {
+      throw new Error(`Android helper ${operation} failed: ${message}`, {
+        cause: error,
+      });
+    }
+
+    if (options?.disableOnFailure !== false) {
+      this.helperUnavailable = true;
+    }
+
+    if (!this.helperUnavailableLogged) {
+      warnDevice(
+        `[midscene] Android helper unavailable, falling back to ADB (${operation}): ${message}`,
+      );
+      this.helperUnavailableLogged = true;
+    }
+    return undefined;
+  }
+
   private async safeCaptureForegroundState(): Promise<
     AndroidForegroundState | undefined
   > {
@@ -672,12 +840,56 @@ ${Object.keys(size)
   }
 
   private async captureForegroundState(): Promise<AndroidForegroundState> {
+    const helperSnapshot = await this.tryHelperRequest(
+      'foregroundState',
+      async (client) =>
+        client.snapshot({
+          include: ['foreground'],
+        }),
+    );
+    const helperForeground =
+      await this.foregroundStateFromHelperSnapshot(helperSnapshot);
+    if (helperForeground) {
+      return helperForeground;
+    }
+
     const adb = await this.getAdb();
     const raw = await adb.shell(
       'dumpsys window | grep -E "mCurrentFocus|mFocusedApp|mResumedActivity|topResumedActivity"',
     );
     const screenSize = await this.size().catch(() => undefined);
     return parseForegroundState(raw, screenSize);
+  }
+
+  private async foregroundStateFromHelperSnapshot(
+    snapshot?: AndroidHelperSnapshot,
+  ): Promise<AndroidForegroundState | undefined> {
+    const foreground = snapshot?.foreground;
+    if (!foreground) {
+      return undefined;
+    }
+
+    if (foreground.raw && (!foreground.packageName || !foreground.activity)) {
+      const screenSize =
+        snapshot.screen?.logicalSize ??
+        (await this.size().catch(() => undefined));
+      return parseForegroundState(foreground.raw, screenSize);
+    }
+
+    const screenSize = snapshot.screen?.logicalSize;
+    return {
+      packageName: foreground.packageName,
+      activity: foreground.activity,
+      pageFingerprint:
+        foreground.pageFingerprint ??
+        createPageFingerprint({
+          packageName: foreground.packageName,
+          activity: foreground.activity,
+          width: screenSize?.width,
+          height: screenSize?.height,
+        }),
+      raw: foreground.raw,
+    };
   }
 
   /**
@@ -692,9 +904,14 @@ ${Object.keys(size)
   }
 
   public async launch(uri: string): Promise<AndroidDevice> {
-    const adb = await this.getAdb();
-
     this.uri = uri;
+
+    if (await this.tryHelperApp({ action: 'launch', uri })) {
+      debugDevice(`Successfully launched via Android helper: ${uri}`);
+      return this;
+    }
+
+    const adb = await this.getAdb();
 
     try {
       debugDevice(`Launching app: ${uri}`);
@@ -735,6 +952,11 @@ ${Object.keys(size)
    * If uri contains "/" (e.g. com.example.app/.MainActivity), only the package part is used.
    */
   public async terminate(uri: string): Promise<void> {
+    if (await this.tryHelperApp({ action: 'terminate', uri })) {
+      debugDevice(`Successfully terminated via Android helper: ${uri}`);
+      return;
+    }
+
     const packagePart = uri.includes('/') ? uri.split('/')[0] : uri;
     const resolved = this.resolvePackageName(packagePart) ?? packagePart;
     const adb = await this.getAdb();
@@ -748,6 +970,24 @@ ${Object.keys(size)
         cause: error,
       });
     }
+  }
+
+  private async tryHelperApp(
+    command: AndroidHelperAppCommand,
+  ): Promise<boolean> {
+    const result = await this.tryHelperRequest('app', async (client) =>
+      client.app(command),
+    );
+    return result?.handled === true;
+  }
+
+  private async tryHelperInput(
+    actions: AndroidHelperInputAction[] | AndroidHelperInputAction,
+  ): Promise<boolean> {
+    const result = await this.tryHelperRequest('input', async (client) =>
+      client.input(actions),
+    );
+    return result?.handled === true;
   }
 
   async execYadb(keyboardContent: string): Promise<void> {
@@ -765,7 +1005,7 @@ ${Object.keys(size)
     return this.diagnostics.time(
       'uiTree',
       'getElementsInfo',
-      { provider: 'uiautomator' },
+      { provider: 'auto' },
       async () => treeToList(await this.getElementsNodeTree()),
     );
   }
@@ -774,7 +1014,7 @@ ${Object.keys(size)
     return this.diagnostics.time(
       'uiTree',
       'getElementsNodeTree',
-      { provider: 'uiautomator' },
+      { provider: 'auto' },
       async () => this.captureAndroidUiTree(),
     );
   }
@@ -834,6 +1074,11 @@ ${Object.keys(size)
   }
 
   private async captureAndroidUiTree(): Promise<ElementNode> {
+    const helperTree = await this.captureHelperUiTree();
+    if (helperTree) {
+      return helperTree;
+    }
+
     const [xml, logicalSize, physicalSize] = await Promise.all([
       this.dumpUiautomatorXml(),
       this.size(),
@@ -841,6 +1086,41 @@ ${Object.keys(size)
     ]);
     const scale = getAndroidUiTreeScale(logicalSize, physicalSize);
     return parseUiautomatorXml(xml, { scale });
+  }
+
+  private async captureHelperUiTree(): Promise<ElementNode | undefined> {
+    const snapshot = await this.tryHelperRequest('uiTree', async (client) =>
+      client.snapshot({
+        include: ['uiTree'],
+      }),
+    );
+    if (!snapshot) {
+      return undefined;
+    }
+
+    if (snapshot.uiTree) {
+      return snapshot.uiTree;
+    }
+
+    if (!snapshot.uiXml) {
+      return undefined;
+    }
+
+    try {
+      const logicalSize =
+        snapshot.screen?.logicalSize ??
+        (await this.size().catch(() => undefined));
+      const physicalSize =
+        snapshot.screen?.physicalSize ??
+        (await this.getOrientedPhysicalSize().catch(() => undefined));
+      if (!logicalSize || !physicalSize) {
+        throw new Error('helper UI XML is missing screen size metadata');
+      }
+      const scale = getAndroidUiTreeScale(logicalSize, physicalSize);
+      return parseUiautomatorXml(snapshot.uiXml, { scale });
+    } catch (error) {
+      return this.handleHelperFailure('uiTreeParse', error);
+    }
   }
 
   private async dumpUiautomatorXml(): Promise<string> {
@@ -1314,6 +1594,12 @@ ${Object.keys(size)
   private async captureScreenshotBase64(): Promise<string> {
     debugDevice('screenshotBase64 begin');
 
+    const helperScreenshot = await this.captureHelperScreenshotBase64();
+    if (helperScreenshot) {
+      debugDevice('screenshotBase64 end (helper mode)');
+      return helperScreenshot;
+    }
+
     // Try scrcpy mode first (if enabled and initialized)
     const adapter = this.getScrcpyAdapter();
     if (adapter.isEnabled()) {
@@ -1492,9 +1778,43 @@ ${Object.keys(size)
     return result;
   }
 
+  private async captureHelperScreenshotBase64(): Promise<string | undefined> {
+    const snapshot = await this.tryHelperRequest('screenshot', async (client) =>
+      client.snapshot({
+        include: ['screenshot'],
+      }),
+    );
+    if (!snapshot) {
+      return undefined;
+    }
+
+    const dataUrl = snapshot.screenshot?.dataUrl;
+    if (dataUrl) {
+      return dataUrl;
+    }
+
+    const rawBase64 = snapshot.screenshot?.base64 ?? snapshot.screenshotBase64;
+    if (!rawBase64) {
+      return undefined;
+    }
+
+    if (rawBase64.startsWith('data:image/')) {
+      return rawBase64;
+    }
+
+    return createImgBase64ByFormat(
+      snapshot.screenshot?.format ?? snapshot.screenshotFormat ?? 'png',
+      rawBase64,
+    );
+  }
+
   async clearInput(element?: ElementInfo): Promise<void> {
     if (element) {
       await this.mouseClick(element.center[0], element.center[1]);
+    }
+
+    if (await this.tryHelperInput({ type: 'clearText' })) {
+      return;
     }
 
     await this.ensureYadb();
@@ -1824,13 +2144,24 @@ ${Object.keys(size)
     options?: AndroidDeviceInputOpt,
   ): Promise<void> {
     if (!text) return;
-    const adb = await this.getAdb();
     const IME_STRATEGY =
       (this.options?.imeStrategy ||
         globalConfigManager.getEnvConfigValue(MIDSCENE_ANDROID_IME_STRATEGY)) ??
       IME_STRATEGY_YADB_FOR_NON_ASCII;
     const shouldAutoDismissKeyboard =
       options?.autoDismissKeyboard ?? this.options?.autoDismissKeyboard ?? true;
+
+    if (
+      await this.tryHelperInput({
+        type: 'text',
+        text,
+        autoDismissKeyboard: shouldAutoDismissKeyboard,
+      })
+    ) {
+      return;
+    }
+
+    const adb = await this.getAdb();
 
     // Decide input path for the entire text, not per-segment.
     const useYadb =
@@ -1888,6 +2219,10 @@ ${Object.keys(size)
   }
 
   async keyboardPress(key: string): Promise<void> {
+    if (await this.tryHelperInput({ type: 'key', key })) {
+      return;
+    }
+
     // Map web keys to Android key codes (numbers)
     const keyCodeMap: Record<string, number> = {
       Enter: 66,
@@ -1922,10 +2257,22 @@ ${Object.keys(size)
   }
 
   async mouseClick(x: number, y: number): Promise<void> {
-    const adb = await this.getAdb();
-
     // Use adjusted coordinates
     const { x: adjustedX, y: adjustedY } = await this.adjustCoordinates(x, y);
+    if (
+      await this.tryHelperInput({
+        type: 'tap',
+        x: adjustedX,
+        y: adjustedY,
+        durationMs: 150,
+        displayId: this.options?.displayId,
+        coordinateSpace: 'physical',
+      })
+    ) {
+      return;
+    }
+
+    const adb = await this.getAdb();
     await adb.shell(
       `input${this.getDisplayArg()} swipe ${adjustedX} ${adjustedY} ${adjustedX} ${adjustedY} 150`,
     );
@@ -1955,15 +2302,26 @@ ${Object.keys(size)
     to: { x: number; y: number },
     duration?: number,
   ): Promise<void> {
-    const adb = await this.getAdb();
-
     // Use adjusted coordinates
     const { x: fromX, y: fromY } = await this.adjustCoordinates(from.x, from.y);
     const { x: toX, y: toY } = await this.adjustCoordinates(to.x, to.y);
 
     // Ensure duration has a default value
     const swipeDuration = duration ?? defaultNormalScrollDuration;
+    if (
+      await this.tryHelperInput({
+        type: 'swipe',
+        from: { x: fromX, y: fromY },
+        to: { x: toX, y: toY },
+        durationMs: swipeDuration,
+        displayId: this.options?.displayId,
+        coordinateSpace: 'physical',
+      })
+    ) {
+      return;
+    }
 
+    const adb = await this.getAdb();
     await adb.shell(
       `input${this.getDisplayArg()} swipe ${fromX} ${fromY} ${toX} ${toY} ${swipeDuration}`,
     );

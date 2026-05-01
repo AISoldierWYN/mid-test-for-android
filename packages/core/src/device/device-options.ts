@@ -65,6 +65,38 @@ export type AndroidDeviceOpt = {
         minScore?: number;
       };
   /**
+   * Phase 3 Android system helper integration.
+   *
+   * Disabled by default. When enabled, AndroidDevice can ask a privileged helper
+   * APK for fast snapshots and direct input/app operations before falling back
+   * to ADB providers.
+   */
+  helper?:
+    | boolean
+    | {
+        /** Enable helper integration. Default: true when the object is present. */
+        enabled?: boolean;
+        /** HTTP endpoint exposed by the helper or an adb-forwarded local port. */
+        endpoint?: string;
+        /** Request timeout in milliseconds. Default: 1000. */
+        timeoutMs?: number;
+        /** Throw instead of falling back to ADB when helper calls fail. */
+        failOnUnavailable?: boolean;
+        /** Stop retrying helper after the first failure in this device instance. Default: true. */
+        disableOnFailure?: boolean;
+        /** Optional adb forward setup for helper HTTP over tcp or localabstract. */
+        adbForward?:
+          | boolean
+          | {
+              /** Local host port. Default: 17310. */
+              localPort?: number;
+              /** Remote TCP port when forwarding tcp-to-tcp. */
+              remotePort?: number;
+              /** Remote localabstract socket name when forwarding localabstract. */
+              localAbstractName?: string;
+            };
+      };
+  /**
    * @deprecated This option has been removed and no longer has any effect.
    * Use `screenshotShrinkFactor` in AgentOpt instead to control screenshot size sent to AI model.
    */
