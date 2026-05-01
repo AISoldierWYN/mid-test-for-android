@@ -5,9 +5,11 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import {
   type DeviceAction,
+  type ElementCacheFeature,
   type InterfaceType,
   type LocateResultElement,
   type Point,
+  type Rect,
   type Size,
   getMidsceneLocationSchema,
   z,
@@ -39,7 +41,11 @@ import {
   MIDSCENE_ANDROID_IME_STRATEGY,
   globalConfigManager,
 } from '@midscene/shared/env';
-import type { ElementInfo } from '@midscene/shared/extractor';
+import {
+  type ElementInfo,
+  type ElementNode,
+  treeToList,
+} from '@midscene/shared/extractor';
 import {
   createImgBase64ByFormat,
   isValidImageBuffer,
@@ -59,6 +65,12 @@ import {
   type DevicePhysicalInfo,
   ScrcpyDeviceAdapter,
 } from './scrcpy-device-adapter';
+import {
+  buildAndroidCacheFeatureForPoint,
+  getAndroidUiTreeScale,
+  parseUiautomatorXml,
+  rectMatchesAndroidCacheFeature,
+} from './ui-tree';
 
 // Re-export AndroidDeviceOpt and AndroidDeviceInputOpt for backward compatibility
 export type {
@@ -744,21 +756,76 @@ ${Object.keys(size)
     return this.diagnostics.time(
       'uiTree',
       'getElementsInfo',
-      { provider: 'empty' },
-      async () => [],
+      { provider: 'uiautomator' },
+      async () => treeToList(await this.getElementsNodeTree()),
     );
   }
 
-  async getElementsNodeTree(): Promise<any> {
+  async getElementsNodeTree(): Promise<ElementNode> {
     return this.diagnostics.time(
       'uiTree',
       'getElementsNodeTree',
-      { provider: 'empty' },
-      async () => ({
-        node: null,
-        children: [],
-      }),
+      { provider: 'uiautomator' },
+      async () => this.captureAndroidUiTree(),
     );
+  }
+
+  async cacheFeatureForPoint(
+    center: [number, number],
+    options?: {
+      targetDescription?: string;
+    },
+  ): Promise<ElementCacheFeature> {
+    return this.diagnostics.time(
+      'uiTree',
+      'cacheFeatureForPoint',
+      {
+        point: center,
+        targetDescription: options?.targetDescription,
+      },
+      async () => {
+        const tree = await this.getElementsNodeTree();
+        return buildAndroidCacheFeatureForPoint(tree, center, options);
+      },
+    );
+  }
+
+  async rectMatchesCacheFeature(feature: ElementCacheFeature): Promise<Rect> {
+    return this.diagnostics.time(
+      'uiTree',
+      'rectMatchesCacheFeature',
+      undefined,
+      async () => {
+        const tree = await this.getElementsNodeTree();
+        return rectMatchesAndroidCacheFeature(tree, feature);
+      },
+    );
+  }
+
+  private async captureAndroidUiTree(): Promise<ElementNode> {
+    const [xml, logicalSize, physicalSize] = await Promise.all([
+      this.dumpUiautomatorXml(),
+      this.size(),
+      this.getOrientedPhysicalSize(),
+    ]);
+    const scale = getAndroidUiTreeScale(logicalSize, physicalSize);
+    return parseUiautomatorXml(xml, { scale });
+  }
+
+  private async dumpUiautomatorXml(): Promise<string> {
+    const adb = await this.getAdb();
+    const dumpId = Date.now().toString(36);
+    const remotePath = `/data/local/tmp/midscene_ui_${dumpId}.xml`;
+    const command = [
+      `uiautomator dump --compressed ${remotePath} >/dev/null`,
+      `cat ${remotePath}`,
+      `rm -f ${remotePath}`,
+    ].join(' && ');
+    const xml = await adb.shell(command);
+    if (!xml || !xml.includes('<hierarchy')) {
+      throw new Error(`Failed to dump Android UI hierarchy: ${xml}`);
+    }
+    return xml;
   }
 
   async getScreenSize(): Promise<{
