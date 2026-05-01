@@ -15,6 +15,13 @@ import { generateHashId } from '@midscene/shared/utils';
 import { replaceIllegalPathCharsAndSpace } from '@midscene/shared/utils';
 import yaml from 'js-yaml';
 import semver from 'semver';
+import {
+  type FlowMacro,
+  PageExperienceGraph,
+  type PageExperienceGraphSnapshot,
+  type PathExperienceDemotionOptions,
+  type PathExperienceInput,
+} from './experience';
 import { getMidsceneVersion } from './utils';
 
 const DEFAULT_CACHE_MAX_FILENAME_LENGTH = 200;
@@ -45,6 +52,8 @@ export type CacheFileContent = {
   midsceneVersion: string;
   cacheId: string;
   caches: Array<PlanningCache | LocateCache>;
+  flowMacros?: FlowMacro[];
+  experience?: PageExperienceGraphSnapshot;
 };
 
 const lowestSupportedMidsceneVersion = '0.16.10';
@@ -65,6 +74,8 @@ export class TaskCache {
   writeOnlyMode: boolean; // a flag to indicate if the cache is in write-only mode
 
   private matchedCacheIndices: Set<string> = new Set(); // Track matched records
+
+  private experienceGraph: PageExperienceGraph;
 
   constructor(
     cacheId: string,
@@ -116,6 +127,7 @@ export class TaskCache {
     this.cacheOriginalLength = this.isCacheResultUsed
       ? this.cache.caches.length
       : 0;
+    this.experienceGraph = new PageExperienceGraph(this.cache.experience);
   }
 
   matchCache(
@@ -246,6 +258,53 @@ export class TaskCache {
     this.flushCacheToFile();
   }
 
+  getFlowMacro(name: string): FlowMacro | undefined {
+    if (!this.isCacheResultUsed) {
+      return undefined;
+    }
+    return this.cache.flowMacros?.find((macro) => macro.name === name);
+  }
+
+  upsertFlowMacro(macro: FlowMacro): void {
+    if (!macro.name?.trim()) {
+      throw new Error('Flow macro name is required');
+    }
+    if (!Array.isArray(macro.flow) || macro.flow.length === 0) {
+      throw new Error(`Flow macro "${macro.name}" requires a non-empty flow`);
+    }
+
+    const flowMacros = this.cache.flowMacros ?? [];
+    const index = flowMacros.findIndex((item) => item.name === macro.name);
+    if (index >= 0) {
+      flowMacros[index] = macro;
+    } else {
+      flowMacros.push(macro);
+    }
+    this.cache.flowMacros = flowMacros;
+    this.flushCacheForExperienceWrite();
+  }
+
+  getExperienceGraph(): PageExperienceGraph {
+    return this.experienceGraph;
+  }
+
+  recordPathExperience(input: PathExperienceInput) {
+    const edge = this.experienceGraph.recordPath(input);
+    this.cache.experience = this.experienceGraph.toJSON();
+    this.flushCacheForExperienceWrite();
+    return edge;
+  }
+
+  degradePathExperience(
+    edgeId: string,
+    options?: PathExperienceDemotionOptions,
+  ) {
+    const edge = this.experienceGraph.degradePath(edgeId, options);
+    this.cache.experience = this.experienceGraph.toJSON();
+    this.flushCacheForExperienceWrite();
+    return edge;
+  }
+
   loadCacheFromFile() {
     const cacheFile = this.cacheFilePath;
     assert(cacheFile, 'cache file path is required');
@@ -366,6 +425,7 @@ export class TaskCache {
 
       const cacheToWrite = {
         ...this.cache,
+        experience: this.experienceGraph.toJSON(),
         caches: sortedCaches,
       };
 
@@ -379,6 +439,14 @@ export class TaskCache {
         err,
       );
     }
+  }
+
+  private flushCacheForExperienceWrite(): void {
+    if (this.readOnlyMode) {
+      debug('read-only mode, experience updated in memory only');
+      return;
+    }
+    this.flushCacheToFile();
   }
 
   updateOrAppendCacheRecord(

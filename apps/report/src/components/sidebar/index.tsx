@@ -5,7 +5,7 @@ import type {
   ExecutionTask,
   ExecutionTaskPlanningLocate,
 } from '@midscene/core';
-import { typeStr } from '@midscene/core/agent';
+import { collectExecutionReportStats, typeStr } from '@midscene/core/agent';
 import {
   type AnimationScript,
   iconForStatus,
@@ -159,10 +159,22 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
     ) : null;
   };
 
-  const getCacheTag = (task: ExecutionTaskWithSearchAreaUsage) => {
-    return task.hitBy?.from === 'Cache' ? (
+  const getSourceTag = (task: ExecutionTaskWithSearchAreaUsage) => {
+    const source = task.hitBy?.from;
+    const label =
+      source === 'Cache'
+        ? 'Cache'
+        : source === 'Structure'
+          ? 'Structure'
+          : source === 'AI'
+            ? 'AI'
+            : null;
+    if (!label) {
+      return null;
+    }
+    return (
       <Tag
-        className="cache-tag"
+        className={`source-tag source-tag-${label.toLowerCase()}`}
         style={{
           padding: '0 4px',
           marginLeft: '4px',
@@ -171,9 +183,9 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
         }}
         bordered={false}
       >
-        Cache
+        {label}
       </Tag>
-    ) : null;
+    );
   };
 
   const getDomIncludedTag = (task: ExecutionTaskWithSearchAreaUsage) => {
@@ -471,6 +483,11 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
     0,
   );
 
+  const executionStats = useMemo(
+    () => collectExecutionReportStats(groupedDump?.executions ?? []),
+    [groupedDump],
+  );
+
   // Keyboard navigation
   useEffect(() => {
     // all tasks
@@ -531,7 +548,7 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
             <span className="status-icon">{getStatusIcon(task)}</span>
             <span>{taskName}</span>
             {getTitleIcon(task)}
-            {getCacheTag(task)}
+            {getSourceTag(task)}
             {getDomIncludedTag(task)}
             {getDeepLocateTag(task)}
             {getDeepThinkTag(task)}
@@ -577,6 +594,12 @@ const Sidebar = (props: SidebarProps = {}): JSX.Element => {
         </div>
       </div>
       <div className="executions-wrapper">
+        <div className="source-stats-row">
+          <span>Cache {executionStats.cacheHit}</span>
+          <span>Structure {executionStats.structuredHit}</span>
+          <span>AI {executionStats.aiFallback}</span>
+          <span>Recovery {executionStats.recovery}</span>
+        </div>
         <div className="tasks-table">
           {/* Header */}
           <div className="table-header">

@@ -680,6 +680,15 @@ export class TaskBuilder {
               cacheToSave: currentCacheEntry,
             },
           };
+        } else if (elementFromAiLocate) {
+          hitBy = {
+            from: 'AI',
+            context: {
+              prompt: param.prompt,
+              fallback: true,
+              cacheToSave: currentCacheEntry,
+            },
+          };
         }
 
         onResult?.(element);

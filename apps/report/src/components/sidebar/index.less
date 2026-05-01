@@ -322,7 +322,7 @@
         }
 
         // Allow tags to shrink
-        .cache-tag,
+        .source-tag,
         .deeplocate-tag,
         .deepthink-tag {
           flex-shrink: 0;
@@ -402,6 +402,23 @@
       overflow-x: hidden;
       min-height: 0;
 
+      .source-stats-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 4px 20px 8px;
+        font-size: 12px;
+        color: #595959;
+
+        span {
+          line-height: 20px;
+          padding: 0 6px;
+          border-radius: 6px;
+          background: #f5f7fa;
+          white-space: nowrap;
+        }
+      }
+
       .executions-tip {
         padding: 12px 20px;
         font-size: 12px;
@@ -434,9 +451,19 @@
 }
 
 // Light mode Tag styles
-.cache-tag {
+.source-tag-cache {
   color: #1890ff;
   background-color: #e0f5ff;
+}
+
+.source-tag-structure {
+  color: #389e0d;
+  background-color: #f0ffe6;
+}
+
+.source-tag-ai {
+  color: #d46b08;
+  background-color: #fff7e6;
 }
 
 .domincluded-tag {
@@ -622,6 +649,14 @@
           color: #1890ff;
         }
       }
+
+      .executions-wrapper .source-stats-row {
+        color: #d1d3db;
+
+        span {
+          background: rgba(255, 255, 255, 0.08);
+        }
+      }
     }
 
     // SVG icons should inherit text color
@@ -630,9 +665,19 @@
     }
 
     // Tag styles for dark mode
-    .cache-tag {
+    .source-tag-cache {
       color: #1890ff !important;
       background-color: rgba(24, 144, 255, 0.15) !important;
+    }
+
+    .source-tag-structure {
+      color: #73d13d !important;
+      background-color: rgba(115, 209, 61, 0.15) !important;
+    }
+
+    .source-tag-ai {
+      color: #ffa940 !important;
+      background-color: rgba(255, 169, 64, 0.15) !important;
     }
 
     .domincluded-tag {

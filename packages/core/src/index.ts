@@ -58,6 +58,27 @@ export type {
 } from './yaml';
 
 export { Agent, type AgentOpt, type AiActOptions, createAgent } from './agent';
+export {
+  PageExperienceGraph,
+  STANDARD_FLOW_MACRO_NAMES,
+  TestModuleRegistry,
+  collectExecutionReportStats,
+  createFlowMacro,
+  type ExecutionReportStats,
+  type FlowMacro,
+  type FlowMacroName,
+  type PageExperienceGraphSnapshot,
+  type PageGraphNode,
+  type PageGraphNodeInput,
+  type PathExperienceDemotionOptions,
+  type PathExperienceEdge,
+  type PathExperienceInput,
+  type PathExperienceStatus,
+  type RegisteredFlowMacro,
+  type TestModule,
+  type TestModuleContext,
+  type TestModuleLoadRule,
+} from './agent';
 
 // Dump utilities
 export {

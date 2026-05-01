@@ -64,6 +64,21 @@ import {
 import { getDebug } from '@midscene/shared/logger';
 import { assert, ifInBrowser, uuid } from '@midscene/shared/utils';
 import { defineActionSleep } from '../device';
+import {
+  type FlowMacro,
+  type FlowMacroName,
+  type PathExperienceDemotionOptions,
+  type PathExperienceInput,
+  type RegisteredFlowMacro,
+  type TestModule,
+  type TestModuleContext,
+  TestModuleRegistry,
+  createFlowMacro,
+} from './experience';
+import {
+  type ExecutionReportStats,
+  collectExecutionReportStats,
+} from './report-stats';
 import { TaskCache } from './task-cache';
 import {
   TaskExecutionError,
@@ -214,6 +229,8 @@ export class Agent<
   private fullActionSpace: DeviceAction[];
 
   private reportGenerator: IReportGenerator;
+
+  private readonly testModuleRegistry = new TestModuleRegistry();
 
   // @deprecated use .interface instead
   get page() {
@@ -369,6 +386,100 @@ export class Agent<
 
   async getActionSpace(): Promise<DeviceAction[]> {
     return this.fullActionSpace;
+  }
+
+  registerTestModule(module: TestModule): this {
+    this.testModuleRegistry.register(module);
+    return this;
+  }
+
+  loadTestModules(context?: TestModuleContext): TestModule[] {
+    return this.testModuleRegistry.loadFor(
+      context ?? this.getDefaultTestModuleContext(),
+    );
+  }
+
+  registerFlowMacro(
+    name: FlowMacroName,
+    flow: FlowMacro['flow'],
+    options: Omit<FlowMacro, 'name' | 'flow'> = {},
+  ): this {
+    const macro = createFlowMacro(name, flow, options);
+    this.taskCache?.upsertFlowMacro(macro);
+    const moduleId = options.moduleId ?? 'local';
+    const existingModule = this.testModuleRegistry.get(moduleId);
+    this.testModuleRegistry.register({
+      ...existingModule,
+      id: moduleId,
+      macros: {
+        ...(existingModule?.macros ?? {}),
+        [name]: macro,
+      },
+    });
+    return this;
+  }
+
+  resolveFlowMacro(
+    name: FlowMacroName,
+    context?: TestModuleContext,
+  ): RegisteredFlowMacro | FlowMacro | undefined {
+    return (
+      this.testModuleRegistry.resolveMacro(
+        name,
+        context ?? this.getDefaultTestModuleContext(),
+      ) ?? this.taskCache?.getFlowMacro(name)
+    );
+  }
+
+  async runFlowMacro(
+    name: FlowMacroName,
+    context?: TestModuleContext,
+  ): Promise<{ result: Record<string, any> }> {
+    const macro = this.resolveFlowMacro(name, context);
+    if (!macro) {
+      throw new Error(`Flow macro not found: ${name}`);
+    }
+    return await this.runYaml(
+      yaml.dump({
+        tasks: [
+          {
+            name: `macro:${macro.name}`,
+            flow: macro.flow,
+          },
+        ],
+      }),
+    );
+  }
+
+  getExperienceGraph() {
+    return this.taskCache?.getExperienceGraph();
+  }
+
+  recordPathExperience(input: PathExperienceInput) {
+    if (!this.taskCache) {
+      throw new Error('Cache is not configured');
+    }
+    return this.taskCache.recordPathExperience(input);
+  }
+
+  degradePathExperience(
+    edgeId: string,
+    options?: PathExperienceDemotionOptions,
+  ) {
+    if (!this.taskCache) {
+      throw new Error('Cache is not configured');
+    }
+    return this.taskCache.degradePathExperience(edgeId, options);
+  }
+
+  getReportStats(): ExecutionReportStats {
+    return collectExecutionReportStats(this.dump.executions);
+  }
+
+  private getDefaultTestModuleContext(): TestModuleContext {
+    return {
+      interfaceType: this.interface.interfaceType,
+    };
   }
 
   private static readonly CONTEXT_RETRY_MAX = 3;
