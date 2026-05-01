@@ -9,3 +9,20 @@ export {
 } from './utils';
 export type { AndroidConnectedDevice } from './utils';
 export { ScrcpyDeviceAdapter } from './scrcpy-device-adapter';
+export {
+  AndroidDiagnosticsRecorder,
+  createPageFingerprint,
+  parseForegroundState,
+  summarizeAndroidDiagnostics,
+  summarizeAndroidExecutionTimings,
+} from './diagnostics';
+export type {
+  AndroidActionStep,
+  AndroidDiagnosticsOptions,
+  AndroidDiagnosticsSnapshot,
+  AndroidDiagnosticsSummary,
+  AndroidExecutionTimingSummary,
+  AndroidForegroundState,
+  AndroidTimingCategory,
+  AndroidTimingEvent,
+} from './diagnostics';

@@ -13,6 +13,7 @@ import {
   type DeviceActionRunAdbShell,
   type DeviceActionTerminate,
 } from './device';
+import type { AndroidDiagnosticsSnapshot } from './diagnostics';
 import { getConnectedDevices } from './utils';
 
 const debugAgent = getDebug('android:agent');
@@ -111,6 +112,20 @@ export class AndroidAgent extends PageAgent<AndroidDevice> {
     const action =
       this.wrapActionInActionSpace<DeviceActionRunAdbShell>('RunAdbShell');
     return action({ command });
+  }
+
+  /**
+   * Read the in-memory Android Phase 0 diagnostics collected by the device.
+   */
+  getDiagnosticsSnapshot(): AndroidDiagnosticsSnapshot {
+    return this.interface.getDiagnosticsSnapshot();
+  }
+
+  /**
+   * Clear the in-memory Android diagnostics buffer.
+   */
+  resetDiagnostics(): void {
+    this.interface.resetDiagnostics();
   }
 
   private createActionWrapper<T extends DeviceAction>(

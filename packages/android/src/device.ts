@@ -49,6 +49,13 @@ import { normalizeForComparison, repeat } from '@midscene/shared/utils';
 
 import { ADB } from 'appium-adb';
 import {
+  AndroidDiagnosticsRecorder,
+  type AndroidDiagnosticsSnapshot,
+  type AndroidForegroundState,
+  type AndroidTimingCategory,
+  parseForegroundState,
+} from './diagnostics';
+import {
   type DevicePhysicalInfo,
   ScrcpyDeviceAdapter,
 } from './scrcpy-device-adapter';
@@ -105,6 +112,7 @@ export class AndroidDevice implements AbstractInterface {
   private appNameMapping: Record<string, string> = {};
   private cachedAdjustScale: { x: number; y: number } | null = null;
   private takeScreenshotFailCount = 0;
+  private readonly diagnostics: AndroidDiagnosticsRecorder;
   private static readonly TAKE_SCREENSHOT_FAIL_THRESHOLD = 3;
   interfaceType: InterfaceType = 'android';
   uri: string | undefined;
@@ -343,7 +351,85 @@ export class AndroidDevice implements AbstractInterface {
     const platformSpecificActions = Object.values(createPlatformActions(this));
 
     const customActions = this.customActions || [];
-    return [...defaultActions, ...platformSpecificActions, ...customActions];
+    return [
+      ...defaultActions,
+      ...platformSpecificActions,
+      ...customActions,
+    ].map((action) => this.wrapActionWithDiagnostics(action));
+  }
+
+  private wrapActionWithDiagnostics<TParam, TReturn>(
+    action: DeviceAction<TParam, TReturn>,
+  ): DeviceAction<TParam, TReturn> {
+    if (!this.diagnostics.enabled) {
+      return action;
+    }
+
+    return {
+      ...action,
+      call: async (param, context) => {
+        const category = this.categoryForAction(action.name);
+        const beforeState = await this.safeCaptureForegroundState();
+        const step = this.diagnostics.startAction(
+          action.name,
+          param,
+          beforeState,
+        );
+
+        try {
+          const result = await this.diagnostics.time(
+            category,
+            action.name,
+            { actionName: action.name },
+            () => action.call(param, context),
+          );
+          const afterState = await this.safeCaptureForegroundState();
+          this.diagnostics.finishAction(step?.id, 'success', {
+            afterState,
+            result,
+          });
+          return result;
+        } catch (error) {
+          const afterState = await this.safeCaptureForegroundState();
+          this.diagnostics.finishAction(step?.id, 'failed', {
+            afterState,
+            error,
+          });
+          throw error;
+        }
+      },
+    };
+  }
+
+  private categoryForAction(actionName: string): AndroidTimingCategory {
+    if (actionName === 'RunAdbShell') {
+      return 'adbShell';
+    }
+    if (actionName === 'Launch' || actionName === 'Terminate') {
+      return 'app';
+    }
+    if (
+      [
+        'Tap',
+        'DoubleClick',
+        'Input',
+        'Scroll',
+        'DragAndDrop',
+        'Swipe',
+        'KeyboardPress',
+        'CursorMove',
+        'LongPress',
+        'PullGesture',
+        'Pinch',
+        'ClearInput',
+        'AndroidBackButton',
+        'AndroidHomeButton',
+        'AndroidRecentAppsButton',
+      ].includes(actionName)
+    ) {
+      return 'input';
+    }
+    return 'action';
   }
 
   constructor(deviceId: string, options?: AndroidDeviceOpt) {
@@ -352,6 +438,7 @@ export class AndroidDevice implements AbstractInterface {
     this.deviceId = deviceId;
     this.options = options;
     this.customActions = options?.customActions;
+    this.diagnostics = new AndroidDiagnosticsRecorder(options?.diagnostics);
   }
 
   describe(): string {
@@ -535,6 +622,43 @@ ${Object.keys(size)
     this.appNameMapping = mapping;
   }
 
+  public getDiagnosticsSnapshot(): AndroidDiagnosticsSnapshot {
+    return this.diagnostics.snapshot();
+  }
+
+  public resetDiagnostics(): void {
+    this.diagnostics.reset();
+  }
+
+  private async safeCaptureForegroundState(): Promise<
+    AndroidForegroundState | undefined
+  > {
+    if (!this.diagnostics.enabled || !this.diagnostics.collectForegroundState) {
+      return undefined;
+    }
+
+    try {
+      return await this.diagnostics.time(
+        'state',
+        'foregroundState',
+        undefined,
+        () => this.captureForegroundState(),
+      );
+    } catch (error) {
+      debugDevice('Failed to capture Android foreground state: %s', error);
+      return undefined;
+    }
+  }
+
+  private async captureForegroundState(): Promise<AndroidForegroundState> {
+    const adb = await this.getAdb();
+    const raw = await adb.shell(
+      'dumpsys window | grep -E "mCurrentFocus|mFocusedApp|mResumedActivity|topResumedActivity"',
+    );
+    const screenSize = await this.size().catch(() => undefined);
+    return parseForegroundState(raw, screenSize);
+  }
+
   /**
    * Resolve app name to package name using the mapping
    * Comparison is case-insensitive and ignores spaces, dashes, and underscores.
@@ -617,15 +741,24 @@ ${Object.keys(size)
 
   // @deprecated
   async getElementsInfo(): Promise<ElementInfo[]> {
-    return [];
+    return this.diagnostics.time(
+      'uiTree',
+      'getElementsInfo',
+      { provider: 'empty' },
+      async () => [],
+    );
   }
 
   async getElementsNodeTree(): Promise<any> {
-    // Simplified implementation, returns an empty node tree
-    return {
-      node: null,
-      children: [],
-    };
+    return this.diagnostics.time(
+      'uiTree',
+      'getElementsNodeTree',
+      { provider: 'empty' },
+      async () => ({
+        node: null,
+        children: [],
+      }),
+    );
   }
 
   async getScreenSize(): Promise<{
@@ -1072,6 +1205,15 @@ ${Object.keys(size)
   }
 
   async screenshotBase64(): Promise<string> {
+    return this.diagnostics.time(
+      'screenshot',
+      'screenshotBase64',
+      { provider: 'auto' },
+      () => this.captureScreenshotBase64(),
+    );
+  }
+
+  private async captureScreenshotBase64(): Promise<string> {
     debugDevice('screenshotBase64 begin');
 
     // Try scrcpy mode first (if enabled and initialized)

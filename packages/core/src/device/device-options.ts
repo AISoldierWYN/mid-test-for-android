@@ -31,6 +31,24 @@ export type AndroidDeviceOpt = {
   /** Custom device actions to register */
   customActions?: DeviceAction<any>[];
   /**
+   * Android runtime diagnostics for Phase 0 baselining.
+   *
+   * Disabled by default. When enabled, the Android runtime records timing spans
+   * and foreground app snapshots around screenshots, UI tree reads, ADB shell
+   * actions, and input actions. The data is kept in memory and can be read from
+   * AndroidDevice.getDiagnosticsSnapshot().
+   */
+  diagnostics?:
+    | boolean
+    | {
+        /** Enable Android runtime diagnostics. */
+        enabled?: boolean;
+        /** Capture package/activity/page fingerprint around actions. Default: true. */
+        collectForegroundState?: boolean;
+        /** Maximum number of timing/step events kept in memory. Default: 500. */
+        maxEvents?: number;
+      };
+  /**
    * @deprecated This option has been removed and no longer has any effect.
    * Use `screenshotShrinkFactor` in AgentOpt instead to control screenshot size sent to AI model.
    */
