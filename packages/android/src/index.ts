@@ -16,6 +16,10 @@ export {
   summarizeAndroidDiagnostics,
   summarizeAndroidExecutionTimings,
 } from './diagnostics';
+export {
+  locateAndroidElementByPrompt,
+  locateAndroidElementWithScore,
+} from './fast-locator';
 export type {
   AndroidActionStep,
   AndroidDiagnosticsOptions,
@@ -26,3 +30,7 @@ export type {
   AndroidTimingCategory,
   AndroidTimingEvent,
 } from './diagnostics';
+export type {
+  AndroidFastLocatorMatch,
+  AndroidFastLocatorOptions,
+} from './fast-locator';

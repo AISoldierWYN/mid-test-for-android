@@ -499,9 +499,40 @@ export class TaskBuilder {
 
         const isCacheHit = !!elementFromCache;
 
+        let elementFromStructuredResult: LocateResultElement | null | undefined;
+        if (
+          !isXpathHit &&
+          !isCacheHit &&
+          !isPlanHit &&
+          this.interface.structuredLocate
+        ) {
+          try {
+            elementFromStructuredResult = await this.interface.structuredLocate(
+              param,
+              {
+                uiContext,
+                modelConfig: modelConfigForDefaultIntent,
+              },
+            );
+          } catch (error) {
+            debug('structuredLocate failed: %s', error);
+          }
+        }
+
+        // elementFromStructuredResult is in logical coordinates, which should
+        // be transformed to screenshot coordinates.
+        const elementFromStructured = elementFromStructuredResult
+          ? transformLogicalElementToScreenshot(
+              elementFromStructuredResult,
+              shrunkShotToLogicalRatio,
+            )
+          : undefined;
+
+        const isStructuredHit = !!elementFromStructured;
+
         let elementFromAiLocate: LocateResultElement | null | undefined;
         const timing = taskContext.task.timing;
-        if (!isXpathHit && !isCacheHit && !isPlanHit) {
+        if (!isXpathHit && !isCacheHit && !isPlanHit && !isStructuredHit) {
           try {
             setTimingFieldOnce(timing, 'callAiStart');
             locateResult = await this.service.locate(
@@ -529,6 +560,7 @@ export class TaskBuilder {
           elementFromBbox ||
           elementFromXpath ||
           elementFromCache ||
+          elementFromStructured ||
           elementFromAiLocate;
 
         // Check if locate cache already exists (for planHitFlag case)
@@ -637,6 +669,14 @@ export class TaskBuilder {
             from: 'Cache',
             context: {
               cacheEntry,
+              cacheToSave: currentCacheEntry,
+            },
+          };
+        } else if (isStructuredHit) {
+          hitBy = {
+            from: 'Structure',
+            context: {
+              prompt: param.prompt,
               cacheToSave: currentCacheEntry,
             },
           };

@@ -49,6 +49,22 @@ export type AndroidDeviceOpt = {
         maxEvents?: number;
       };
   /**
+   * Phase 2 Android structured pre-locate.
+   *
+   * Enabled by default. When enabled, Android can resolve obvious targets from
+   * the current uiautomator tree before paying the AI locate cost. Low
+   * confidence matches are ignored so the normal AI fallback can correct the
+   * path.
+   */
+  structuredLocate?:
+    | boolean
+    | {
+        /** Enable structured pre-locate. Default: true. */
+        enabled?: boolean;
+        /** Minimum confidence to accept a structured match. Default: 0.72. */
+        minScore?: number;
+      };
+  /**
    * @deprecated This option has been removed and no longer has any effect.
    * Use `screenshotShrinkFactor` in AgentOpt instead to control screenshot size sent to AI model.
    */

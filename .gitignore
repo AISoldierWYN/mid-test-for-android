@@ -133,6 +133,7 @@ packages/playground/static/
 **/AGENTS.md
 !CLAUDE.md
 !AGENTS.md
+arc.md
 
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md

@@ -181,4 +181,62 @@ describe('TaskBuilder', () => {
     expect(fastActionCall).toHaveBeenCalledTimes(1);
     expect(fastAfterHook).toHaveBeenCalledTimes(1);
   });
+
+  it('uses structured locate before AI locate', async () => {
+    const mockInterface = new MockInterface([]);
+    mockInterface.structuredLocate = vi.fn().mockResolvedValue({
+      description: 'Settings',
+      center: [20, 30],
+      rect: { left: 10, top: 20, width: 20, height: 20 },
+    });
+
+    const insightService = {
+      contextRetrieverFn: vi.fn(),
+      locate: vi.fn(),
+    } as unknown as Service;
+
+    const modelConfig = { mode: 'default' } as any;
+    const taskBuilder = new TaskBuilder({
+      interfaceInstance: mockInterface,
+      service: insightService,
+      actionSpace: mockInterface.actionSpace(),
+    });
+
+    const { tasks } = await taskBuilder.build(
+      [
+        {
+          type: 'Locate',
+          thought: 'find settings',
+          param: { prompt: 'settings' },
+        },
+      ],
+      {} as any,
+      modelConfig,
+    );
+
+    const uiContext = {
+      shrunkShotToLogicalRatio: 2,
+      deprecatedDpr: 1,
+    };
+    const result = await tasks[0].executor(tasks[0].param, {
+      task: { timing: {} },
+      uiContext,
+    } as any);
+
+    expect(mockInterface.structuredLocate).toHaveBeenCalledWith(
+      { prompt: 'settings' },
+      { uiContext, modelConfig },
+    );
+    expect(insightService.locate).not.toHaveBeenCalled();
+    expect(result?.output?.element).toMatchObject({
+      description: 'Settings',
+      center: [40, 60],
+      rect: { left: 20, top: 40, width: 40, height: 40 },
+      dpr: 1,
+    });
+    expect(result?.hitBy).toMatchObject({
+      from: 'Structure',
+      context: { prompt: 'settings' },
+    });
+  });
 });

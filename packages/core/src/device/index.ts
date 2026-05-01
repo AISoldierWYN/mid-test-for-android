@@ -3,6 +3,7 @@ import type {
   ActionScrollParam,
   DeviceAction,
   LocateResultElement,
+  PlanningLocateParam,
 } from '@/types';
 import type { IModelConfig } from '@midscene/shared/env';
 import type { ElementNode } from '@midscene/shared/extractor';
@@ -32,6 +33,20 @@ export abstract class AbstractInterface {
   abstract rectMatchesCacheFeature?(
     feature: ElementCacheFeature,
   ): Promise<Rect>;
+
+  /**
+   * Optional non-AI locator backed by structured runtime state, such as DOM or
+   * native accessibility trees. Return an element in logical coordinates; the
+   * task builder will scale it to the current screenshot coordinate space.
+   * Return null/undefined to continue with the normal AI locate path.
+   */
+  abstract structuredLocate?(
+    param: PlanningLocateParam,
+    options?: {
+      uiContext?: UIContext;
+      modelConfig?: IModelConfig;
+    },
+  ): Promise<LocateResultElement | null | undefined>;
 
   abstract destroy?(): Promise<void>;
 

@@ -8,6 +8,7 @@ import {
   type ElementCacheFeature,
   type InterfaceType,
   type LocateResultElement,
+  type PlanningLocateParam,
   type Point,
   type Rect,
   type Size,
@@ -61,6 +62,7 @@ import {
   type AndroidTimingCategory,
   parseForegroundState,
 } from './diagnostics';
+import { locateAndroidElementByPrompt } from './fast-locator';
 import {
   type DevicePhysicalInfo,
   ScrcpyDeviceAdapter,
@@ -100,6 +102,13 @@ export function escapeForShell(text: string): string {
   return text
     .replace(/'/g, "'\\''") // End quote, escaped quote, start quote: ' → '\''
     .replace(/\n/g, '\\n'); // 0x0A → literal \n (yadb interprets back to newline)
+}
+
+function promptToText(prompt: PlanningLocateParam['prompt']): string {
+  if (typeof prompt === 'string') {
+    return prompt;
+  }
+  return prompt?.prompt ?? '';
 }
 
 export class AndroidDevice implements AbstractInterface {
@@ -798,6 +807,28 @@ ${Object.keys(size)
       async () => {
         const tree = await this.getElementsNodeTree();
         return rectMatchesAndroidCacheFeature(tree, feature);
+      },
+    );
+  }
+
+  async structuredLocate(
+    param: PlanningLocateParam,
+  ): Promise<LocateResultElement | null> {
+    const option = this.options?.structuredLocate;
+    const enabled =
+      typeof option === 'object' ? option.enabled !== false : option !== false;
+    if (!enabled) {
+      return null;
+    }
+
+    const minScore = typeof option === 'object' ? option.minScore : undefined;
+    return this.diagnostics.time(
+      'uiTree',
+      'structuredLocate',
+      { prompt: promptToText(param.prompt), minScore },
+      async () => {
+        const tree = await this.getElementsNodeTree();
+        return locateAndroidElementByPrompt(tree, param.prompt, { minScore });
       },
     );
   }

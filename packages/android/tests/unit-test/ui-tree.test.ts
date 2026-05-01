@@ -2,6 +2,10 @@ import { NodeType } from '@midscene/shared/constants';
 import { describe, expect, it, vi } from 'vitest';
 import { AndroidDevice } from '../../src/device';
 import {
+  locateAndroidElementByPrompt,
+  locateAndroidElementWithScore,
+} from '../../src/fast-locator';
+import {
   buildAndroidCacheFeatureForPoint,
   parseBounds,
   parseUiautomatorXml,
@@ -121,6 +125,35 @@ describe('Android UI tree parser', () => {
   });
 });
 
+describe('Android fast locator', () => {
+  it('finds high-confidence targets from text, content-desc, and resource id', () => {
+    const tree = parseUiautomatorXml(sampleXml, {
+      scale: { x: 0.5, y: 0.5 },
+    });
+
+    const login = locateAndroidElementWithScore(tree, 'login button');
+    expect(login?.confidence).toBeGreaterThanOrEqual(0.72);
+    expect(login?.element).toMatchObject({
+      description: 'Sign in Login button',
+      center: [50, 35],
+      rect: { left: 10, top: 20, width: 80, height: 30 },
+    });
+
+    const email = locateAndroidElementByPrompt(tree, 'email input field');
+    expect(email?.center).toEqual([50, 75]);
+  });
+
+  it('returns null for low-confidence prompts so AI can fallback', () => {
+    const tree = parseUiautomatorXml(sampleXml, {
+      scale: { x: 0.5, y: 0.5 },
+    });
+
+    expect(
+      locateAndroidElementByPrompt(tree, 'checkout button', { minScore: 0.8 }),
+    ).toBeNull();
+  });
+});
+
 describe('AndroidDevice UI tree integration', () => {
   it('dumps uiautomator XML and exposes Android cache hooks', async () => {
     const device = new AndroidDevice('test-device', {
@@ -157,6 +190,12 @@ describe('AndroidDevice UI tree integration', () => {
       top: 20,
       width: 80,
       height: 30,
+    });
+    await expect(
+      device.structuredLocate({ prompt: 'login button' }),
+    ).resolves.toMatchObject({
+      center: [50, 35],
+      rect: { left: 10, top: 20, width: 80, height: 30 },
     });
     expect(mockAdb.shell).toHaveBeenCalledWith(
       expect.stringContaining('uiautomator dump --compressed'),
