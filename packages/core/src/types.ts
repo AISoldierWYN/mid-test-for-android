@@ -153,6 +153,64 @@ export interface LocateResult {
   rect?: Rect;
 }
 
+export interface LocateCandidate {
+  element: LocateResultElement;
+  confidence?: number;
+  source?: string;
+  reason?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface CandidateAdjudicationConfig {
+  enabled?: boolean;
+  maxCandidates?: number;
+  minConfidence?: number;
+  autoAcceptConfidence?: number;
+  aiEnabled?: boolean;
+}
+
+export type CandidateAdjudication = boolean | CandidateAdjudicationConfig;
+
+export type RuntimeRecoveryIssueKind =
+  | 'permission-dialog'
+  | 'system-dialog'
+  | 'overlay'
+  | 'ad'
+  | 'login-required'
+  | 'crash'
+  | 'anr'
+  | 'network'
+  | 'keyboard'
+  | 'unknown';
+
+export interface RuntimeRecoveryIssue {
+  kind: RuntimeRecoveryIssueKind;
+  severity?: 'info' | 'warning' | 'critical';
+  message?: string;
+  packageName?: string;
+  activity?: string;
+  bounds?: Rect;
+  raw?: unknown;
+}
+
+export interface RuntimeRecoveryState {
+  timestamp?: number;
+  summary?: string;
+  foreground?: {
+    packageName?: string;
+    activity?: string;
+    pageFingerprint?: string;
+    raw?: string;
+  };
+  keyboard?: {
+    shown?: boolean;
+    inputMethod?: string;
+    raw?: string;
+  };
+  issues?: RuntimeRecoveryIssue[];
+  raw?: unknown;
+}
+
 export type ThinkingLevel = 'off' | 'medium' | 'high';
 
 export type DeepThinkOption = 'unset' | true | false;
@@ -1092,6 +1150,12 @@ export interface AgentOpt {
   reportAttributes?: ReportAttributes;
   modelConfig?: TModelConfig;
   cache?: Cache;
+  /**
+   * Use structured runtime candidates before full visual locate when available.
+   * Android can provide candidates from the native UI tree; AI then only
+   * adjudicates among that compact list. Default: enabled.
+   */
+  candidateAdjudication?: CandidateAdjudication;
   /**
    * Maximum number of replanning cycles for aiAct.
    * Defaults to 20 (40 for `vlm-ui-tars`) when not provided.

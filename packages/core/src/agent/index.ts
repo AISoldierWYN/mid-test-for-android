@@ -39,6 +39,20 @@ export {
   collectExecutionReportStats,
   type ExecutionReportStats,
 } from './report-stats';
+export {
+  DEFAULT_CANDIDATE_ADJUDICATION_CONFIG,
+  buildCompactRecoveryEvidence,
+  compactLocateCandidates,
+  formatCompactRecoveryEvidenceForAI,
+  formatExperienceGraphForPlanning,
+  formatLocateCandidatesForPrompt,
+  normalizeCandidateAdjudicationConfig,
+  promptFromLocateParam,
+} from './recovery';
+export type {
+  CompactLocateCandidate,
+  CompactRecoveryEvidence,
+} from './recovery';
 
 export { TaskExecutor } from './tasks';
 

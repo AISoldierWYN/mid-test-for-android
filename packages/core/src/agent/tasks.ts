@@ -16,8 +16,10 @@ import type Service from '@/service';
 import type { TaskRunner } from '@/task-runner';
 import { TaskExecutionError } from '@/task-runner';
 import type {
+  CandidateAdjudicationConfig,
   DeepThinkOption,
   DeviceAction,
+  ExecutionTask,
   ExecutionTaskApply,
   ExecutionTaskInsightQueryApply,
   ExecutionTaskPlanningApply,
@@ -27,6 +29,7 @@ import type {
   PlanningAIResponse,
   PlanningAction,
   PlanningActionParamWaitFor,
+  PlanningLocateParam,
   ServiceDump,
   ServiceExtractOption,
   ServiceExtractParam,
@@ -36,6 +39,12 @@ import { type IModelConfig, getCurrentTime } from '@midscene/shared/env';
 import { getDebug } from '@midscene/shared/logger';
 import { assert } from '@midscene/shared/utils';
 import { ExecutionSession } from './execution-session';
+import {
+  buildCompactRecoveryEvidence,
+  formatCompactRecoveryEvidenceForAI,
+  normalizeCandidateAdjudicationConfig,
+  promptFromLocateParam,
+} from './recovery';
 import { TaskBuilder } from './task-builder';
 import type { TaskCache } from './task-cache';
 export { locatePlanForLocate } from './task-builder';
@@ -83,6 +92,8 @@ export class TaskExecutor {
 
   useDeviceTimestamp?: boolean;
 
+  private readonly candidateAdjudication: Required<CandidateAdjudicationConfig>;
+
   // @deprecated use .interface instead
   get page() {
     return this.interface;
@@ -99,6 +110,7 @@ export class TaskExecutor {
       useDeviceTimestamp?: boolean;
       hooks?: TaskExecutorHooks;
       actionSpace: DeviceAction[];
+      candidateAdjudication?: CandidateAdjudicationConfig;
     },
   ) {
     this.interface = interfaceInstance;
@@ -110,12 +122,16 @@ export class TaskExecutor {
     this.useDeviceTimestamp = opts.useDeviceTimestamp;
     this.hooks = opts.hooks;
     this.providedActionSpace = opts.actionSpace;
+    this.candidateAdjudication = normalizeCandidateAdjudicationConfig(
+      opts.candidateAdjudication,
+    );
     this.taskBuilder = new TaskBuilder({
       interfaceInstance,
       service,
       taskCache: opts.taskCache,
       actionSpace: this.getActionSpace(),
       waitAfterAction: opts.waitAfterAction,
+      candidateAdjudication: this.candidateAdjudication,
     });
   }
 
@@ -150,6 +166,72 @@ export class TaskExecutor {
       this.useDeviceTimestamp,
     );
     return getReadableTimeString(format, timestamp);
+  }
+
+  private async createRecoveryFeedback(input: {
+    error: unknown;
+    timeString: string;
+    userPrompt: string;
+  }): Promise<string> {
+    const error =
+      input.error instanceof TaskExecutionError ? input.error : undefined;
+    const failedTask = error?.errorTask;
+    const [runtimeState, candidates] = await Promise.all([
+      this.safeGetRecoveryState(),
+      this.collectRecoveryCandidates(failedTask),
+    ]);
+    const evidence = buildCompactRecoveryEvidence({
+      error: input.error,
+      time: input.timeString,
+      userInstruction: input.userPrompt,
+      failedTask,
+      runtimeState,
+      candidates,
+      maxCandidates: this.candidateAdjudication.maxCandidates,
+    });
+    return formatCompactRecoveryEvidenceForAI(evidence);
+  }
+
+  private async safeGetRecoveryState() {
+    if (!this.interface.recoveryState) {
+      return undefined;
+    }
+    try {
+      return await this.interface.recoveryState();
+    } catch (error) {
+      debug('recoveryState failed: %s', error);
+      return undefined;
+    }
+  }
+
+  private async collectRecoveryCandidates(
+    failedTask: ExecutionTask | null | undefined,
+  ) {
+    if (
+      !this.candidateAdjudication.enabled ||
+      !this.interface.structuredLocateCandidates ||
+      failedTask?.type !== 'Planning' ||
+      failedTask.subType !== 'Locate'
+    ) {
+      return undefined;
+    }
+
+    const param = failedTask.param as PlanningLocateParam | undefined;
+    if (!param || !promptFromLocateParam(param)) {
+      return undefined;
+    }
+
+    try {
+      return await this.interface.structuredLocateCandidates(param, {
+        uiContext: failedTask.uiContext,
+        maxCandidates: this.candidateAdjudication.maxCandidates,
+        minConfidence: this.candidateAdjudication.minConfidence,
+        candidateAdjudication: this.candidateAdjudication,
+      });
+    } catch (error) {
+      debug('collect recovery candidates failed: %s', error);
+      return undefined;
+    }
   }
 
   public async convertPlanToExecutable(
@@ -491,7 +573,12 @@ export class TaskExecutor {
         // errorFlag = true;
         errorCountInOnePlanningLoop++;
         const timeString = await this.getTimeString();
-        conversationHistory.pendingFeedbackMessage = `Time: ${timeString}, Error executing running tasks: ${error?.message || String(error)}`;
+        conversationHistory.pendingFeedbackMessage =
+          await this.createRecoveryFeedback({
+            error,
+            timeString,
+            userPrompt,
+          });
         debug(
           'error when executing running tasks, but continue to run if it is not too many errors:',
           error instanceof Error ? error.message : String(error),

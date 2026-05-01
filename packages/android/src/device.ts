@@ -7,10 +7,13 @@ import {
   type DeviceAction,
   type ElementCacheFeature,
   type InterfaceType,
+  type LocateCandidate,
   type LocateResultElement,
   type PlanningLocateParam,
   type Point,
   type Rect,
+  type RuntimeRecoveryIssue,
+  type RuntimeRecoveryState,
   type Size,
   getMidsceneLocationSchema,
   z,
@@ -63,7 +66,10 @@ import {
   createPageFingerprint,
   parseForegroundState,
 } from './diagnostics';
-import { locateAndroidElementByPrompt } from './fast-locator';
+import {
+  locateAndroidElementByPrompt,
+  locateAndroidElementCandidates,
+} from './fast-locator';
 import {
   type AndroidHelperAppCommand,
   AndroidHelperClient,
@@ -126,6 +132,81 @@ function promptToText(prompt: PlanningLocateParam['prompt']): string {
     return prompt;
   }
   return prompt?.prompt ?? '';
+}
+
+function buildRuntimeRecoveryIssues(
+  snapshot: AndroidHelperSnapshot | null,
+): RuntimeRecoveryIssue[] {
+  const issues: RuntimeRecoveryIssue[] = [];
+  const guard = snapshot?.guard;
+
+  if (guard?.permissionDialog) {
+    issues.push({
+      kind: 'permission-dialog',
+      severity: 'warning',
+      message: 'Permission dialog is visible',
+    });
+  }
+
+  if (guard?.systemDialog) {
+    issues.push({
+      kind: 'system-dialog',
+      severity: 'warning',
+      message: 'System dialog is visible',
+    });
+  }
+
+  const crash = guard?.crash ?? snapshot?.crash;
+  if (crash?.detected) {
+    issues.push({
+      kind: 'crash',
+      severity: 'critical',
+      message: crash.message ?? 'Application crash detected',
+      packageName: crash.packageName,
+      raw: crash.raw,
+    });
+  }
+
+  const anr = guard?.anr ?? snapshot?.anr;
+  if (anr?.detected) {
+    issues.push({
+      kind: 'anr',
+      severity: 'critical',
+      message: anr.message ?? 'Application not responding detected',
+      packageName: anr.packageName,
+      raw: anr.raw,
+    });
+  }
+
+  const overlays = guard?.overlays ?? snapshot?.overlays ?? [];
+  for (const overlay of overlays.slice(0, 5)) {
+    const overlayText = `${overlay.title ?? ''} ${overlay.packageName ?? ''}`;
+    issues.push({
+      kind: /(^|\W)(ad|ads|advertisement)(\W|$)|广告/u.test(overlayText)
+        ? 'ad'
+        : 'overlay',
+      severity: 'warning',
+      message: overlay.title ?? overlay.type ?? 'Overlay window detected',
+      packageName: overlay.packageName,
+      bounds: overlay.bounds,
+      raw: overlay.raw,
+    });
+  }
+
+  return issues;
+}
+
+function summarizeRuntimeRecoveryState(
+  foreground: AndroidForegroundState | undefined,
+  issues: RuntimeRecoveryIssue[],
+): string {
+  if (issues.length) {
+    return `Detected ${issues.map((issue) => issue.kind).join(', ')}`;
+  }
+  if (foreground?.packageName || foreground?.activity) {
+    return `Foreground ${foreground.packageName ?? 'unknown'}/${foreground.activity ?? 'unknown'}`;
+  }
+  return 'No abnormal runtime issue detected';
 }
 
 export class AndroidDevice implements AbstractInterface {
@@ -892,6 +973,35 @@ ${Object.keys(size)
     };
   }
 
+  private async captureRecoveryState(): Promise<RuntimeRecoveryState> {
+    const helperSnapshot = await this.getAndroidHelperSnapshot([
+      'foreground',
+      'keyboard',
+      'overlays',
+      'crash',
+      'anr',
+      'guard',
+    ]);
+    const foreground =
+      (await this.foregroundStateFromHelperSnapshot(
+        helperSnapshot ?? undefined,
+      )) ??
+      (await this.captureForegroundState().catch((error) => {
+        debugDevice('Failed to capture foreground for recovery: %s', error);
+        return undefined;
+      }));
+    const issues = buildRuntimeRecoveryIssues(helperSnapshot);
+
+    return {
+      timestamp: helperSnapshot?.timestamp ?? Date.now(),
+      summary: summarizeRuntimeRecoveryState(foreground, issues),
+      foreground,
+      keyboard: helperSnapshot?.keyboard,
+      issues,
+      raw: helperSnapshot?.guard?.raw ?? helperSnapshot?.raw,
+    };
+  }
+
   /**
    * Resolve app name to package name using the mapping
    * Comparison is case-insensitive and ignores spaces, dashes, and underscores.
@@ -1070,6 +1180,52 @@ ${Object.keys(size)
         const tree = await this.getElementsNodeTree();
         return locateAndroidElementByPrompt(tree, param.prompt, { minScore });
       },
+    );
+  }
+
+  async structuredLocateCandidates(
+    param: PlanningLocateParam,
+    options?: {
+      maxCandidates?: number;
+      minConfidence?: number;
+    },
+  ): Promise<LocateCandidate[]> {
+    const option = this.options?.structuredLocate;
+    const enabled =
+      typeof option === 'object' ? option.enabled !== false : option !== false;
+    if (!enabled) {
+      return [];
+    }
+
+    const minScore =
+      options?.minConfidence ??
+      (typeof option === 'object' ? option.minCandidateScore : undefined) ??
+      0.45;
+    const maxCandidates =
+      options?.maxCandidates ??
+      (typeof option === 'object' ? option.maxCandidates : undefined) ??
+      5;
+
+    return this.diagnostics.time(
+      'uiTree',
+      'structuredLocateCandidates',
+      { prompt: promptToText(param.prompt), minScore, maxCandidates },
+      async () => {
+        const tree = await this.getElementsNodeTree();
+        return locateAndroidElementCandidates(tree, param.prompt, {
+          minScore,
+          maxCandidates,
+        });
+      },
+    );
+  }
+
+  async recoveryState(): Promise<RuntimeRecoveryState> {
+    return this.diagnostics.time(
+      'state',
+      'recoveryState',
+      undefined,
+      async () => this.captureRecoveryState(),
     );
   }
 

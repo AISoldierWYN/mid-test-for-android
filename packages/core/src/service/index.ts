@@ -1,3 +1,4 @@
+import { formatLocateCandidatesForPrompt } from '@/agent/recovery';
 import { isAutoGLM, isUITars } from '@/ai-model/auto-glm/util';
 import {
   AIResponseParseError,
@@ -12,11 +13,13 @@ import type {
   AIDescribeElementResponse,
   AIUsageInfo,
   DetailedLocateParam,
+  LocateCandidate,
   LocateResultElement,
   LocateResultWithDump,
   PartialServiceDumpFromSDK,
   PlanningLocateParam,
   Rect,
+  ServiceDump,
   ServiceExtractOption,
   ServiceExtractParam,
   ServiceExtractResult,
@@ -220,6 +223,77 @@ export default class Service {
     };
   }
 
+  async adjudicateLocateCandidate(
+    query: PlanningLocateParam,
+    candidates: LocateCandidate[],
+    modelConfig: IModelConfig,
+    options?: {
+      context?: UIContext;
+      abortSignal?: AbortSignal;
+      maxCandidates?: number;
+    },
+  ): Promise<{
+    candidate: LocateCandidate | null;
+    index?: number;
+    thought?: string;
+    dump?: ServiceDump;
+  }> {
+    if (!candidates.length) {
+      return { candidate: null };
+    }
+
+    const target =
+      typeof query.prompt === 'string' ? query.prompt : query.prompt?.prompt;
+    assert(target, 'query.prompt is required for candidate adjudication');
+
+    const candidateText = formatLocateCandidatesForPrompt(
+      candidates,
+      options?.maxCandidates,
+    );
+    const demand = {
+      candidateIndex: [
+        `Choose the single best candidate for the target: "${target}".`,
+        'Return only a 1-based candidate index from the list, or 0 if none of them match.',
+        'Do not choose a candidate outside the list.',
+        `Candidates:\n${candidateText}`,
+      ].join('\n'),
+      reason: 'Brief reason for the chosen candidate.',
+    };
+
+    const result = await this.extract<{
+      candidateIndex?: number | string;
+      index?: number | string;
+      result?: number | string;
+      reason?: string;
+    }>(
+      demand,
+      modelConfig,
+      {
+        domIncluded: false,
+        screenshotIncluded: false,
+      },
+      undefined,
+      undefined,
+      options?.context ?? (await this.contextRetrieverFn()),
+    );
+
+    const index = parseCandidateIndex(result.data, candidates.length);
+    if (index === undefined) {
+      return {
+        candidate: null,
+        thought: result.thought ?? result.data?.reason,
+        dump: result.dump,
+      };
+    }
+
+    return {
+      candidate: candidates[index],
+      index,
+      thought: result.thought ?? result.data?.reason,
+      dump: result.dump,
+    };
+  }
+
   async extract<T>(
     dataDemand: ServiceExtractParam,
     modelConfig: IModelConfig,
@@ -405,4 +479,32 @@ export default class Service {
     assert(content.description, 'failed to describe the element');
     return content;
   }
+}
+
+function parseCandidateIndex(
+  data: unknown,
+  candidateCount: number,
+): number | undefined {
+  const value =
+    data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).candidateIndex ??
+        (data as Record<string, unknown>).index ??
+        (data as Record<string, unknown>).result)
+      : data;
+  const numberValue =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number.parseInt(value.trim(), 10)
+        : Number.NaN;
+
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
+    return undefined;
+  }
+
+  const zeroBasedIndex = numberValue - 1;
+  if (zeroBasedIndex < 0 || zeroBasedIndex >= candidateCount) {
+    return undefined;
+  }
+  return zeroBasedIndex;
 }

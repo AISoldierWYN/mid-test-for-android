@@ -3,6 +3,7 @@ import type { AbstractInterface } from '@/device';
 import type Service from '@/service';
 import { setTimingFieldOnce } from '@/task-timing';
 import type {
+  CandidateAdjudicationConfig,
   DetailedLocateParam,
   DeviceAction,
   ElementCacheFeature,
@@ -10,6 +11,7 @@ import type {
   ExecutionTaskApply,
   ExecutionTaskHitBy,
   ExecutionTaskPlanningLocateApply,
+  LocateCandidate,
   LocateResultElement,
   LocateResultWithDump,
   PlanningAction,
@@ -23,6 +25,7 @@ import type { IModelConfig } from '@midscene/shared/env';
 import { generateElementByRect } from '@midscene/shared/extractor';
 import { getDebug } from '@midscene/shared/logger';
 import { assert } from '@midscene/shared/utils';
+import { normalizeCandidateAdjudicationConfig } from './recovery';
 import type { TaskCache } from './task-cache';
 import {
   ifPlanLocateParamIsBbox,
@@ -62,6 +65,7 @@ interface TaskBuilderDeps {
   taskCache?: TaskCache;
   actionSpace: DeviceAction[];
   waitAfterAction?: number;
+  candidateAdjudication?: CandidateAdjudicationConfig;
 }
 
 interface BuildOptions {
@@ -90,18 +94,24 @@ export class TaskBuilder {
 
   private readonly waitAfterAction?: number;
 
+  private readonly candidateAdjudication: Required<CandidateAdjudicationConfig>;
+
   constructor({
     interfaceInstance,
     service,
     taskCache,
     actionSpace,
     waitAfterAction,
+    candidateAdjudication,
   }: TaskBuilderDeps) {
     this.interface = interfaceInstance;
     this.service = service;
     this.taskCache = taskCache;
     this.actionSpace = actionSpace;
     this.waitAfterAction = waitAfterAction;
+    this.candidateAdjudication = normalizeCandidateAdjudicationConfig(
+      candidateAdjudication,
+    );
   }
 
   public async build(
@@ -530,9 +540,90 @@ export class TaskBuilder {
 
         const isStructuredHit = !!elementFromStructured;
 
+        let elementFromCandidateResult: LocateResultElement | null | undefined;
+        let candidateSelection:
+          | {
+              candidate: LocateCandidate | null;
+              index?: number;
+              thought?: string;
+              dump?: ServiceDump;
+            }
+          | undefined;
+        if (
+          !isXpathHit &&
+          !isCacheHit &&
+          !isPlanHit &&
+          !isStructuredHit &&
+          this.candidateAdjudication.enabled &&
+          this.interface.structuredLocateCandidates
+        ) {
+          try {
+            const candidates = await this.interface.structuredLocateCandidates(
+              param,
+              {
+                uiContext,
+                modelConfig: modelConfigForDefaultIntent,
+                maxCandidates: this.candidateAdjudication.maxCandidates,
+                minConfidence: this.candidateAdjudication.minConfidence,
+                candidateAdjudication: this.candidateAdjudication,
+              },
+            );
+            const usableCandidates = candidates
+              .filter((candidate) => candidate.element)
+              .slice(0, this.candidateAdjudication.maxCandidates);
+            const topCandidate = usableCandidates[0];
+
+            if (
+              topCandidate &&
+              (topCandidate.confidence ?? 0) >=
+                this.candidateAdjudication.autoAcceptConfidence
+            ) {
+              candidateSelection = {
+                candidate: topCandidate,
+                index: 0,
+                thought: 'Auto accepted high-confidence structured candidate',
+              };
+            } else if (
+              usableCandidates.length > 0 &&
+              this.candidateAdjudication.aiEnabled
+            ) {
+              candidateSelection = await this.service.adjudicateLocateCandidate(
+                param,
+                usableCandidates,
+                modelConfigForDefaultIntent,
+                {
+                  context: uiContext,
+                  abortSignal,
+                  maxCandidates: this.candidateAdjudication.maxCandidates,
+                },
+              );
+              applyDump(candidateSelection.dump);
+            }
+
+            elementFromCandidateResult = candidateSelection?.candidate?.element;
+          } catch (error) {
+            debug('candidate adjudication failed: %s', error);
+          }
+        }
+
+        const elementFromCandidate = elementFromCandidateResult
+          ? transformLogicalElementToScreenshot(
+              elementFromCandidateResult,
+              shrunkShotToLogicalRatio,
+            )
+          : undefined;
+
+        const isCandidateHit = !!elementFromCandidate;
+
         let elementFromAiLocate: LocateResultElement | null | undefined;
         const timing = taskContext.task.timing;
-        if (!isXpathHit && !isCacheHit && !isPlanHit && !isStructuredHit) {
+        if (
+          !isXpathHit &&
+          !isCacheHit &&
+          !isPlanHit &&
+          !isStructuredHit &&
+          !isCandidateHit
+        ) {
           try {
             setTimingFieldOnce(timing, 'callAiStart');
             locateResult = await this.service.locate(
@@ -561,6 +652,7 @@ export class TaskBuilder {
           elementFromXpath ||
           elementFromCache ||
           elementFromStructured ||
+          elementFromCandidate ||
           elementFromAiLocate;
 
         // Check if locate cache already exists (for planHitFlag case)
@@ -677,6 +769,22 @@ export class TaskBuilder {
             from: 'Structure',
             context: {
               prompt: param.prompt,
+              cacheToSave: currentCacheEntry,
+            },
+          };
+        } else if (isCandidateHit) {
+          hitBy = {
+            from: 'AI',
+            context: {
+              prompt: param.prompt,
+              candidateAdjudication: true,
+              candidateIndex:
+                candidateSelection?.index === undefined
+                  ? undefined
+                  : candidateSelection.index + 1,
+              confidence: candidateSelection?.candidate?.confidence,
+              reason: candidateSelection?.candidate?.reason,
+              source: candidateSelection?.candidate?.source,
               cacheToSave: currentCacheEntry,
             },
           };

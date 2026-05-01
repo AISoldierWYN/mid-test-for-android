@@ -1,9 +1,12 @@
 import { getMidsceneLocationSchema } from '@/common';
 import type {
   ActionScrollParam,
+  CandidateAdjudicationConfig,
   DeviceAction,
+  LocateCandidate,
   LocateResultElement,
   PlanningLocateParam,
+  RuntimeRecoveryState,
 } from '@/types';
 import type { IModelConfig } from '@midscene/shared/env';
 import type { ElementNode } from '@midscene/shared/extractor';
@@ -47,6 +50,29 @@ export abstract class AbstractInterface {
       modelConfig?: IModelConfig;
     },
   ): Promise<LocateResultElement | null | undefined>;
+
+  /**
+   * Optional structured candidate provider. Native runtimes can return a
+   * compact list of likely elements so the AI only adjudicates among candidates
+   * instead of scanning the whole screenshot.
+   */
+  abstract structuredLocateCandidates?(
+    param: PlanningLocateParam,
+    options?: {
+      uiContext?: UIContext;
+      modelConfig?: IModelConfig;
+      maxCandidates?: number;
+      minConfidence?: number;
+      candidateAdjudication?: CandidateAdjudicationConfig;
+    },
+  ): Promise<LocateCandidate[]>;
+
+  /**
+   * Optional runtime abnormal-state summary used when replanning after a
+   * failure. Android helper APKs can expose dialogs, overlays, crashes, ANRs,
+   * keyboard state, and foreground package/activity here.
+   */
+  abstract recoveryState?(): Promise<RuntimeRecoveryState | null | undefined>;
 
   abstract destroy?(): Promise<void>;
 

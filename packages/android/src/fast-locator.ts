@@ -1,4 +1,4 @@
-import type { LocateResultElement } from '@midscene/core';
+import type { LocateCandidate, LocateResultElement } from '@midscene/core';
 import { NodeType } from '@midscene/shared/constants';
 import {
   type ElementInfo,
@@ -66,20 +66,52 @@ export function locateAndroidElementWithScore(
   prompt: unknown,
   options?: AndroidFastLocatorOptions,
 ): AndroidFastLocatorMatch | null {
+  return (
+    locateAndroidElementCandidatesWithScore(tree, prompt, options)[0] ?? null
+  );
+}
+
+export function locateAndroidElementCandidates(
+  tree: ElementNode,
+  prompt: unknown,
+  options?: AndroidFastLocatorOptions & { maxCandidates?: number },
+): LocateCandidate[] {
+  return locateAndroidElementCandidatesWithScore(tree, prompt, options).map(
+    (match) => ({
+      element: match.element,
+      confidence: match.confidence,
+      source: 'android-ui-tree',
+      reason: match.reason,
+      metadata: {
+        resourceId: match.node.attributes.resourceId,
+        text: match.node.attributes.text,
+        contentDescription: match.node.attributes.contentDescription,
+        className: match.node.attributes.className,
+        clickable: match.node.attributes.clickable,
+        xpaths: match.node.xpaths,
+      },
+    }),
+  );
+}
+
+export function locateAndroidElementCandidatesWithScore(
+  tree: ElementNode,
+  prompt: unknown,
+  options?: AndroidFastLocatorOptions & { maxCandidates?: number },
+): AndroidFastLocatorMatch[] {
   const promptText = promptToText(prompt);
   const promptNormalized = normalizeText(promptText);
   if (!promptNormalized) {
-    return null;
+    return [];
   }
 
   const minScore = options?.minScore ?? DEFAULT_MIN_SCORE;
-  const matches = treeToList(tree)
+  return treeToList(tree)
     .filter(isUsableNode)
     .map((node) => scoreNode(node, promptNormalized))
     .filter((match) => match.confidence >= minScore)
-    .sort(compareMatches);
-
-  return matches[0] ?? null;
+    .sort(compareMatches)
+    .slice(0, options?.maxCandidates ?? 5);
 }
 
 function promptToText(prompt: unknown): string {

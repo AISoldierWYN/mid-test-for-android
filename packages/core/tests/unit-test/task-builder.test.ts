@@ -239,4 +239,99 @@ describe('TaskBuilder', () => {
       context: { prompt: 'settings' },
     });
   });
+
+  it('uses AI candidate adjudication before full visual locate', async () => {
+    const mockInterface = new MockInterface([]);
+    const candidates = [
+      {
+        element: {
+          description: 'Secondary login text',
+          center: [10, 20],
+          rect: { left: 0, top: 10, width: 20, height: 20 },
+        },
+        confidence: 0.5,
+        source: 'android-ui-tree',
+        reason: 'partial text',
+      },
+      {
+        element: {
+          description: 'Login button',
+          center: [30, 40],
+          rect: { left: 20, top: 30, width: 20, height: 20 },
+        },
+        confidence: 0.68,
+        source: 'android-ui-tree',
+        reason: 'resource-id',
+      },
+    ];
+    mockInterface.structuredLocate = vi.fn().mockResolvedValue(null);
+    mockInterface.structuredLocateCandidates = vi
+      .fn()
+      .mockResolvedValue(candidates);
+
+    const insightService = {
+      contextRetrieverFn: vi.fn(),
+      locate: vi.fn(),
+      adjudicateLocateCandidate: vi.fn().mockResolvedValue({
+        candidate: candidates[1],
+        index: 1,
+        thought: 'button candidate wins',
+      }),
+    } as unknown as Service;
+
+    const taskBuilder = new TaskBuilder({
+      interfaceInstance: mockInterface,
+      service: insightService,
+      actionSpace: mockInterface.actionSpace(),
+      candidateAdjudication: {
+        enabled: true,
+        minConfidence: 0.45,
+        maxCandidates: 5,
+      },
+    });
+
+    const { tasks } = await taskBuilder.build(
+      [
+        {
+          type: 'Locate',
+          thought: 'find login',
+          param: { prompt: 'login button' },
+        },
+      ],
+      {} as any,
+      { mode: 'default' } as any,
+    );
+
+    const result = await tasks[0].executor(tasks[0].param, {
+      task: { timing: {} },
+      uiContext: {
+        shrunkShotToLogicalRatio: 2,
+        deprecatedDpr: 1,
+      },
+    } as any);
+
+    expect(mockInterface.structuredLocateCandidates).toHaveBeenCalledWith(
+      { prompt: 'login button' },
+      expect.objectContaining({
+        maxCandidates: 5,
+        minConfidence: 0.45,
+      }),
+    );
+    expect(insightService.adjudicateLocateCandidate).toHaveBeenCalled();
+    expect(insightService.locate).not.toHaveBeenCalled();
+    expect(result?.output?.element).toMatchObject({
+      description: 'Login button',
+      center: [60, 80],
+      rect: { left: 40, top: 60, width: 40, height: 40 },
+    });
+    expect(result?.hitBy).toMatchObject({
+      from: 'AI',
+      context: {
+        candidateAdjudication: true,
+        candidateIndex: 2,
+        confidence: 0.68,
+        reason: 'resource-id',
+      },
+    });
+  });
 });

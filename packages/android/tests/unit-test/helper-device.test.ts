@@ -172,4 +172,81 @@ describe('AndroidDevice helper integration', () => {
       expect.stringContaining('uiautomator dump --compressed'),
     );
   });
+
+  it('exposes helper guard state as recovery evidence', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonResponse({
+        ok: true,
+        data: {
+          timestamp: 123,
+          foreground: {
+            packageName: 'com.example',
+            activity: '.MainActivity',
+            pageFingerprint: 'home',
+          },
+          keyboard: {
+            shown: true,
+            inputMethod: 'demo.ime',
+          },
+          guard: {
+            permissionDialog: true,
+            crash: {
+              detected: true,
+              packageName: 'com.example',
+              message: 'Process crashed',
+            },
+            overlays: [
+              {
+                packageName: 'com.ads',
+                title: 'Advertisement',
+                bounds: { left: 0, top: 0, width: 100, height: 50 },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetch);
+    const device = new AndroidDevice('test-device', {
+      helper: { endpoint: 'http://helper.local', timeoutMs: 100 },
+      scrcpyConfig: { enabled: false },
+    });
+
+    const state = await device.recoveryState();
+
+    expect(state).toMatchObject({
+      timestamp: 123,
+      foreground: {
+        packageName: 'com.example',
+        activity: '.MainActivity',
+        pageFingerprint: 'home',
+      },
+      keyboard: {
+        shown: true,
+        inputMethod: 'demo.ime',
+      },
+    });
+    expect(state.summary).toContain('permission-dialog');
+    expect(state.issues?.map((issue) => issue.kind)).toEqual([
+      'permission-dialog',
+      'crash',
+      'ad',
+    ]);
+    expect(fetch).toHaveBeenCalledWith(
+      'http://helper.local/snapshot',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          include: [
+            'foreground',
+            'keyboard',
+            'overlays',
+            'crash',
+            'anr',
+            'guard',
+          ],
+        }),
+      }),
+    );
+  });
 });

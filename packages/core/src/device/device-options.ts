@@ -63,6 +63,10 @@ export type AndroidDeviceOpt = {
         enabled?: boolean;
         /** Minimum confidence to accept a structured match. Default: 0.72. */
         minScore?: number;
+        /** Minimum confidence for candidates passed to AI adjudication. Default: 0.45. */
+        minCandidateScore?: number;
+        /** Maximum candidates passed to AI adjudication. Default: 5. */
+        maxCandidates?: number;
       };
   /**
    * Phase 3 Android system helper integration.

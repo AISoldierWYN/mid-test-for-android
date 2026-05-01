@@ -17,6 +17,7 @@ export {
   summarizeAndroidExecutionTimings,
 } from './diagnostics';
 export {
+  locateAndroidElementCandidates,
   locateAndroidElementByPrompt,
   locateAndroidElementWithScore,
 } from './fast-locator';

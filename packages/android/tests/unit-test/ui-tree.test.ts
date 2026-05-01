@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AndroidDevice } from '../../src/device';
 import {
   locateAndroidElementByPrompt,
+  locateAndroidElementCandidates,
   locateAndroidElementWithScore,
 } from '../../src/fast-locator';
 import {
@@ -151,6 +152,29 @@ describe('Android fast locator', () => {
     expect(
       locateAndroidElementByPrompt(tree, 'checkout button', { minScore: 0.8 }),
     ).toBeNull();
+  });
+
+  it('returns compact candidates for AI adjudication', () => {
+    const tree = parseUiautomatorXml(sampleXml, {
+      scale: { x: 0.5, y: 0.5 },
+    });
+
+    const candidates = locateAndroidElementCandidates(tree, 'login', {
+      minScore: 0.45,
+      maxCandidates: 3,
+    });
+
+    expect(candidates[0]).toMatchObject({
+      source: 'android-ui-tree',
+      reason: expect.any(String),
+      element: {
+        description: 'Sign in Login button',
+        center: [50, 35],
+      },
+      metadata: {
+        resourceId: 'com.example:id/login',
+      },
+    });
   });
 });
 

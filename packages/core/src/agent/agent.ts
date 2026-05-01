@@ -76,6 +76,10 @@ import {
   createFlowMacro,
 } from './experience';
 import {
+  formatExperienceGraphForPlanning,
+  normalizeCandidateAdjudicationConfig,
+} from './recovery';
+import {
   type ExecutionReportStats,
   collectExecutionReportStats,
 } from './report-stats';
@@ -366,6 +370,9 @@ export class Agent<
           }
         },
       },
+      candidateAdjudication: normalizeCandidateAdjudicationConfig(
+        this.opts.candidateAdjudication,
+      ),
     });
     this.dump = this.resetDump();
     this.reportFileName =
@@ -474,6 +481,14 @@ export class Agent<
 
   getReportStats(): ExecutionReportStats {
     return collectExecutionReportStats(this.dump.executions);
+  }
+
+  private buildAiActContextWithExperience(): string | undefined {
+    const experienceContext = formatExperienceGraphForPlanning(
+      this.taskCache?.getExperienceGraph(),
+    );
+    const contextParts = [this.aiActContext, experienceContext].filter(Boolean);
+    return contextParts.length ? contextParts.join('\n\n') : undefined;
   }
 
   private getDefaultTestModuleContext(): TestModuleContext {
@@ -1068,12 +1083,13 @@ export class Agent<
 
       // If cache matched but is not executable, fall through to normal execution
       const imagesIncludeCount: number = deepThink ? 2 : 1;
+      const aiActContext = this.buildAiActContextWithExperience();
       const { output: actionOutput } = await this.taskExecutor.action(
         taskPrompt,
         modelConfigForPlanning,
         defaultIntentModelConfig,
         includeBboxInPlanning,
-        this.aiActContext,
+        aiActContext,
         cacheable,
         replanningCycleLimit,
         imagesIncludeCount,
