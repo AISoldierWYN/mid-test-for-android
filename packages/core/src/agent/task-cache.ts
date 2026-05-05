@@ -130,6 +130,17 @@ export class TaskCache {
     this.experienceGraph = new PageExperienceGraph(this.cache.experience);
   }
 
+  resetMatchedCacheUsage(): void {
+    this.matchedCacheIndices.clear();
+    this.cacheOriginalLength = this.isCacheResultUsed
+      ? this.cache.caches.length
+      : 0;
+    debug(
+      'cache match cycle reset, record length: %d',
+      this.cacheOriginalLength,
+    );
+  }
+
   matchCache(
     prompt: TUserPrompt,
     type: 'plan' | 'locate',
@@ -249,6 +260,9 @@ export class TaskCache {
   appendCache(cache: PlanningCache | LocateCache) {
     debug('will append cache', cache);
     this.cache.caches.push(cache);
+    this.cacheOriginalLength = this.isCacheResultUsed
+      ? this.cache.caches.length
+      : 0;
 
     if (this.readOnlyMode) {
       debug('read-only mode, cache appended to memory but not flushed to file');
@@ -415,6 +429,16 @@ export class TaskCache {
         debug('created cache directory: %s', dir);
       }
 
+      const dedupedCaches = dedupeEquivalentLocateCaches(this.cache.caches);
+      const dedupedCount = this.cache.caches.length - dedupedCaches.length;
+      if (dedupedCount > 0) {
+        debug('deduped %d equivalent locate cache record(s)', dedupedCount);
+        this.cache.caches = dedupedCaches;
+        this.cacheOriginalLength = this.isCacheResultUsed
+          ? this.cache.caches.length
+          : 0;
+      }
+
       // Sort caches to ensure plan entries come before locate entries for better readability
       // Create a sorted copy for writing to disk while keeping in-memory order unchanged
       const sortedCaches = [...this.cache.caches].sort((a, b) => {
@@ -469,7 +493,113 @@ export class TaskCache {
         });
       }
     } else {
+      const equivalentRecord = this.findEquivalentCacheRecord(newRecord);
+      if (equivalentRecord) {
+        debug('equivalent cache record found, update instead of append');
+        this.updateOrAppendCacheRecord(newRecord, equivalentRecord);
+        return;
+      }
       this.appendCache(newRecord);
     }
   }
+
+  private findEquivalentCacheRecord(
+    newRecord: PlanningCache | LocateCache,
+  ): MatchCacheResult<PlanningCache | LocateCache> | undefined {
+    for (let i = 0; i < this.cache.caches.length; i++) {
+      const item = this.cache.caches[i];
+      if (item.type !== newRecord.type) {
+        continue;
+      }
+      if (!isDeepStrictEqual(item.prompt, newRecord.prompt)) {
+        continue;
+      }
+      if (item.type === 'plan' && newRecord.type === 'plan') {
+        return this.createCacheMatchResult(item, newRecord.type, i);
+      }
+      if (
+        item.type === 'locate' &&
+        newRecord.type === 'locate' &&
+        areLocateCachesEquivalent(item, newRecord)
+      ) {
+        return this.createCacheMatchResult(item, newRecord.type, i);
+      }
+    }
+    return undefined;
+  }
+
+  private createCacheMatchResult<T extends PlanningCache | LocateCache>(
+    item: T,
+    type: T['type'],
+    index: number,
+  ): MatchCacheResult<T> {
+    return {
+      cacheContent: item,
+      cacheUsable: true,
+      updateFn: (cb: (cache: T) => void) => {
+        cb(item);
+
+        if (this.readOnlyMode) {
+          debug(
+            'read-only mode, equivalent cache updated in memory but not flushed to file',
+          );
+          return;
+        }
+
+        debug(
+          'equivalent cache updated, will flush to file, type: %s, index: %d',
+          type,
+          index,
+        );
+        this.flushCacheToFile();
+      },
+    };
+  }
+}
+
+function normalizeLocateCache(record: LocateCache): LocateCache {
+  const cache =
+    record.cache || (record.xpaths ? { xpaths: record.xpaths } : {});
+  return {
+    type: 'locate',
+    prompt: record.prompt,
+    cache,
+  };
+}
+
+function areLocateCachesEquivalent(
+  current: LocateCache,
+  incoming: LocateCache,
+): boolean {
+  const normalizedCurrent = normalizeLocateCache(current);
+  const normalizedIncoming = normalizeLocateCache(incoming);
+  return isDeepStrictEqual(normalizedCurrent.cache, normalizedIncoming.cache);
+}
+
+function dedupeEquivalentLocateCaches(
+  caches: Array<PlanningCache | LocateCache>,
+): Array<PlanningCache | LocateCache> {
+  const deduped: Array<PlanningCache | LocateCache> = [];
+
+  for (const cache of caches) {
+    if (cache.type !== 'locate') {
+      deduped.push(cache);
+      continue;
+    }
+
+    const existingIndex = deduped.findIndex(
+      (item) =>
+        item.type === 'locate' &&
+        isDeepStrictEqual(item.prompt, cache.prompt) &&
+        areLocateCachesEquivalent(item, cache),
+    );
+
+    if (existingIndex >= 0) {
+      deduped[existingIndex] = cache;
+    } else {
+      deduped.push(cache);
+    }
+  }
+
+  return deduped;
 }

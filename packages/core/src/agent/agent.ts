@@ -659,6 +659,7 @@ export class Agent<
     type: string,
     opt?: T, // and all other action params
   ) {
+    this.taskCache?.resetMatchedCacheUsage();
     debug('callActionInActionSpace', type, ',', opt);
 
     const actionPlan: PlanningAction<T> = {
@@ -1020,6 +1021,8 @@ export class Agent<
     taskPrompt: string,
     opt?: AiActOptions,
   ): Promise<string | undefined> {
+    this.taskCache?.resetMatchedCacheUsage();
+
     const fileChooserAccept = opt?.fileChooserAccept
       ? this.normalizeFileInput(opt.fileChooserAccept)
       : undefined;

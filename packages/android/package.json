@@ -35,7 +35,7 @@
     "build": "rslib build",
     "build:watch": "rslib build --watch --no-clean",
     "prepack": "node scripts/download-scrcpy-server.mjs && node scripts/download-yadb.mjs",
-    "playground": "DEBUG=midscene:* tsx demo/playground.ts",
+    "playground": "tsx demo/playground.ts",
     "test": "vitest --run",
     "test:u": "vitest --run -u",
     "test:ai": "AI_TEST_TYPE=android npm run test",
