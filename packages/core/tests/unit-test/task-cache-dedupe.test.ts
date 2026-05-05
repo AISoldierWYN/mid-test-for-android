@@ -95,4 +95,80 @@ describe('TaskCache locate cache reuse and dedupe', () => {
       internal.cache.caches.filter((item) => item.prompt === 'WLAN option'),
     ).toHaveLength(1);
   });
+
+  it('skips scoped cache records when the current page scope mismatches', () => {
+    const taskCache = new TaskCache(uuid(), true);
+    const internal = getTaskCacheInternal(taskCache);
+    internal.cache.caches.push({
+      type: 'locate',
+      prompt: 'WLAN option',
+      operation: 'Tap',
+      scope: {
+        interfaceType: 'android',
+        packageName: 'com.android.settings',
+        activity: '.Settings',
+        pageFingerprint: 'settings-home',
+      },
+      cache: {
+        xpaths: ['/hierarchy/node[1]'],
+      },
+    });
+    internal.cacheOriginalLength = 1;
+
+    const mismatch = taskCache.matchLocateCache('WLAN option', {
+      interfaceType: 'android',
+      packageName: 'com.demo.app',
+      activity: '.MainActivity',
+      pageFingerprint: 'demo-home',
+    });
+    expect(mismatch).toBeUndefined();
+
+    const match = taskCache.matchLocateCache('WLAN option', {
+      interfaceType: 'android',
+      packageName: 'com.android.settings',
+      activity: '.Settings',
+      pageFingerprint: 'settings-home',
+    });
+    expect(match).toBeDefined();
+    expect(match?.scopeMatch).toBe('exact');
+  });
+
+  it('records cache verification and degrades stale entries safely', () => {
+    const taskCache = new TaskCache(uuid(), true);
+    const locateRecord = {
+      type: 'locate' as const,
+      prompt: 'Submit button',
+      operation: 'Tap',
+      cache: {
+        xpaths: ['/hierarchy/node[1]'],
+      },
+    };
+
+    taskCache.updateOrAppendCacheRecord(locateRecord);
+    const internal = getTaskCacheInternal(taskCache);
+    const cachedRecord = internal.cache.caches[0];
+
+    taskCache.recordCacheVerification(cachedRecord, {
+      status: 'failure',
+      source: 'rectMatchesCacheFeature',
+      reason: 'not found',
+    });
+
+    expect(cachedRecord.stats?.failureCount).toBe(1);
+    expect(cachedRecord.state?.status).toBe('degraded');
+    expect(cachedRecord.lastVerification).toMatchObject({
+      status: 'failure',
+      source: 'rectMatchesCacheFeature',
+      reason: 'not found',
+    });
+
+    taskCache.recordCacheVerification(cachedRecord, {
+      status: 'success',
+      source: 'rectMatchesCacheFeature',
+    });
+
+    expect(cachedRecord.stats?.successCount).toBe(1);
+    expect(cachedRecord.state?.status).toBe('active');
+    expect(cachedRecord.lastVerification?.status).toBe('success');
+  });
 });

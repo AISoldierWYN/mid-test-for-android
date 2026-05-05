@@ -96,6 +96,13 @@ describe('bbox locate cache fix', () => {
         texts: ['search box'],
       }),
       rectMatchesCacheFeature: vi.fn().mockResolvedValue(undefined),
+      recoveryState: vi.fn().mockResolvedValue({
+        foreground: {
+          packageName: 'com.example.app',
+          activity: '.MainActivity',
+          pageFingerprint: 'main-page',
+        },
+      }),
     } as unknown as AbstractInterface;
 
     // Create mock service with typed methods
@@ -208,6 +215,13 @@ describe('bbox locate cache fix', () => {
       expect(cachedLocate).toBeDefined();
       expect(cachedLocate?.cache).toBeDefined();
       expect(cachedLocate?.cache?.xpaths).toContain('/html/body/input[1]');
+      expect(cachedLocate?.operation).toBe('Tap');
+      expect(cachedLocate?.scope).toMatchObject({
+        interfaceType: 'web',
+        packageName: 'com.example.app',
+        activity: '.MainActivity',
+        pageFingerprint: 'main-page',
+      });
     });
 
     it('should not call AI locate when bbox is available', async () => {
@@ -448,6 +462,70 @@ describe('bbox locate cache fix', () => {
 
       // Verify AI locate was NOT called
       expect(mockService.locate).not.toHaveBeenCalled();
+    });
+
+    it('should skip scoped locate cache on a different page and fall back to AI', async () => {
+      const cacheId = uuid();
+      const testCache = new TaskCache(cacheId, true);
+      const internal = getTaskCacheInternal(testCache);
+      internal.cache.caches.push({
+        type: 'locate',
+        prompt: 'settings row',
+        operation: 'Tap',
+        scope: {
+          interfaceType: 'web',
+          packageName: 'com.android.settings',
+          activity: '.Settings',
+          pageFingerprint: 'settings-home',
+        },
+        cache: {
+          xpaths: ['/html/body/old-row[1]'],
+        },
+      });
+      internal.cacheOriginalLength = 1;
+
+      const taskBuilderWithCache = new TaskBuilder({
+        interfaceInstance: mockInterface,
+        service: mockService,
+        taskCache: testCache,
+        actionSpace: mockInterface.actionSpace(),
+      });
+
+      const plansWithoutBbox = [
+        {
+          type: 'Tap',
+          param: {
+            locate: {
+              prompt: 'settings row',
+            },
+          },
+          thought: 'tap settings row',
+        },
+      ];
+
+      const { tasks } = await taskBuilderWithCache.build(
+        plansWithoutBbox,
+        mockModelConfig,
+        mockModelConfig,
+      );
+
+      const locateTask = tasks.find((task) => task.subType === 'Locate');
+      await locateTask!.executor(locateTask!.param, {
+        task: {
+          type: 'Planning',
+          subType: 'Locate',
+          param: locateTask!.param,
+          status: 'running',
+          timing: { start: Date.now(), end: 0, cost: 0 },
+          executor: locateTask!.executor,
+        },
+        uiContext: await createMockUIContext(validBase64Image),
+      });
+
+      expect(mockInterface.rectMatchesCacheFeature).not.toHaveBeenCalledWith({
+        xpaths: ['/html/body/old-row[1]'],
+      });
+      expect(mockService.locate).toHaveBeenCalled();
     });
   });
 

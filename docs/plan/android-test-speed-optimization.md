@@ -811,6 +811,8 @@ wrong-action rate after cache hit
 
 ### Phase A: Cache Correctness Foundation
 
+状态：已完成第一版实现。`plan`/`locate` cache 已具备 page scope、验证结果统计、stale/degraded 状态；`locate` cache 已记录 operation type，并保留已有 dedupe 与 per-action cache match reset。
+
 交付：
 
 - 给 `plan` 和 `locate` cache 增加 page scope。

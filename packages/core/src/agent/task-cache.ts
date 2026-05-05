@@ -28,15 +28,65 @@ const DEFAULT_CACHE_MAX_FILENAME_LENGTH = 200;
 
 export const debug = getDebug('cache');
 
-export interface PlanningCache {
+export interface CacheScope {
+  interfaceType?: string;
+  url?: string;
+  packageName?: string;
+  activity?: string;
+  pageFingerprint?: string;
+  sdk?: string | number;
+  manufacturer?: string;
+  locale?: string;
+  orientation?: string;
+  displayId?: string | number;
+  appVersion?: string;
+}
+
+export type CacheScopeMatch = 'exact' | 'compatible' | 'mismatch' | 'unknown';
+
+export interface CacheEntryStats {
+  hitCount?: number;
+  successCount?: number;
+  failureCount?: number;
+  lastHitAt?: string;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+}
+
+export interface CacheEntryState {
+  status?: 'active' | 'degraded' | 'stale' | 'disabled';
+  confidence?: number;
+  reason?: string;
+  updatedAt?: string;
+}
+
+export interface CacheVerificationResult {
+  status: 'success' | 'failure';
+  source?: string;
+  reason?: string;
+}
+
+export interface CacheVerificationRecord extends CacheVerificationResult {
+  at: string;
+}
+
+interface CacheEntryMetadata {
+  scope?: CacheScope;
+  stats?: CacheEntryStats;
+  state?: CacheEntryState;
+  lastVerification?: CacheVerificationRecord;
+}
+
+export interface PlanningCache extends CacheEntryMetadata {
   type: 'plan';
   prompt: string;
   yamlWorkflow: string;
 }
 
-export interface LocateCache {
+export interface LocateCache extends CacheEntryMetadata {
   type: 'locate';
   prompt: TUserPrompt;
+  operation?: string;
   cache?: ElementCacheFeature;
   /** @deprecated kept for backward compatibility */
   xpaths?: string[];
@@ -45,6 +95,7 @@ export interface LocateCache {
 export interface MatchCacheResult<T extends PlanningCache | LocateCache> {
   cacheContent: T;
   cacheUsable: boolean;
+  scopeMatch?: CacheScopeMatch;
   updateFn: (cb: (cache: T) => void) => void;
 }
 
@@ -58,6 +109,7 @@ export type CacheFileContent = {
 
 const lowestSupportedMidsceneVersion = '0.16.10';
 export const cacheFileExt = '.cache.yaml';
+const CACHE_FAILURES_BEFORE_STALE = 3;
 
 export class TaskCache {
   cacheId: string;
@@ -144,6 +196,7 @@ export class TaskCache {
   matchCache(
     prompt: TUserPrompt,
     type: 'plan' | 'locate',
+    scope?: CacheScope,
   ): MatchCacheResult<PlanningCache | LocateCache> | undefined {
     if (!this.isCacheResultUsed) {
       return undefined;
@@ -154,9 +207,12 @@ export class TaskCache {
     for (let i = 0; i < this.cacheOriginalLength; i++) {
       const item = this.cache.caches[i];
       const key = `${type}:${promptStr}:${i}`;
+      const scopeMatch = matchCacheScope(item.scope, scope);
       if (
         item.type === type &&
         isDeepStrictEqual(item.prompt, prompt) &&
+        scopeMatch !== 'mismatch' &&
+        !isCacheEntrySkipped(item) &&
         !this.matchedCacheIndices.has(key)
       ) {
         if (item.type === 'locate') {
@@ -169,15 +225,18 @@ export class TaskCache {
           }
         }
         this.matchedCacheIndices.add(key);
+        this.recordCacheHitInMemory(item);
         debug(
-          'cache found and marked as used, type: %s, prompt: %s, index: %d',
+          'cache found and marked as used, type: %s, prompt: %s, index: %d, scopeMatch: %s',
           type,
           prompt,
           i,
+          scopeMatch,
         );
         return {
           cacheContent: item,
           cacheUsable: true,
+          scopeMatch,
           updateFn: (cb: (cache: PlanningCache | LocateCache) => void) => {
             debug(
               'will call updateFn to update cache, type: %s, prompt: %s, index: %d',
@@ -209,8 +268,11 @@ export class TaskCache {
     return undefined;
   }
 
-  matchPlanCache(prompt: string): MatchCacheResult<PlanningCache> | undefined {
-    const result = this.matchCache(prompt, 'plan') as
+  matchPlanCache(
+    prompt: string,
+    scope?: CacheScope,
+  ): MatchCacheResult<PlanningCache> | undefined {
+    const result = this.matchCache(prompt, 'plan', scope) as
       | MatchCacheResult<PlanningCache>
       | undefined;
     if (!result) return undefined;
@@ -251,13 +313,30 @@ export class TaskCache {
 
   matchLocateCache(
     prompt: TUserPrompt,
+    scope?: CacheScope,
   ): MatchCacheResult<LocateCache> | undefined {
-    return this.matchCache(prompt, 'locate') as
+    return this.matchCache(prompt, 'locate', scope) as
       | MatchCacheResult<LocateCache>
       | undefined;
   }
 
+  recordCacheVerification(
+    record: PlanningCache | LocateCache | undefined,
+    verification: CacheVerificationResult,
+  ): void {
+    if (!record) {
+      return;
+    }
+    updateCacheVerificationState(record, verification);
+    if (this.readOnlyMode) {
+      debug('read-only mode, cache verification updated in memory only');
+      return;
+    }
+    this.flushCacheToFile();
+  }
+
   appendCache(cache: PlanningCache | LocateCache) {
+    ensureWritableCacheMetadata(cache);
     debug('will append cache', cache);
     this.cache.caches.push(cache);
     this.cacheOriginalLength = this.isCacheResultUsed
@@ -477,16 +556,23 @@ export class TaskCache {
     newRecord: PlanningCache | LocateCache,
     cachedRecord?: MatchCacheResult<PlanningCache | LocateCache>,
   ) {
+    ensureWritableCacheMetadata(newRecord);
     if (cachedRecord) {
       // update existing record
       if (newRecord.type === 'plan') {
         cachedRecord.updateFn((cache) => {
-          (cache as PlanningCache).yamlWorkflow = newRecord.yamlWorkflow;
+          const planCache = cache as PlanningCache;
+          planCache.yamlWorkflow = newRecord.yamlWorkflow;
+          planCache.scope = newRecord.scope ?? planCache.scope;
+          planCache.state = newRecord.state ?? planCache.state;
         });
       } else {
         cachedRecord.updateFn((cache) => {
           const locateCache = cache as LocateCache;
           locateCache.cache = newRecord.cache;
+          locateCache.operation = newRecord.operation ?? locateCache.operation;
+          locateCache.scope = newRecord.scope ?? locateCache.scope;
+          locateCache.state = newRecord.state ?? locateCache.state;
           if ('xpaths' in locateCache) {
             locateCache.xpaths = undefined;
           }
@@ -514,7 +600,11 @@ export class TaskCache {
       if (!isDeepStrictEqual(item.prompt, newRecord.prompt)) {
         continue;
       }
-      if (item.type === 'plan' && newRecord.type === 'plan') {
+      if (
+        item.type === 'plan' &&
+        newRecord.type === 'plan' &&
+        matchCacheScope(item.scope, newRecord.scope) !== 'mismatch'
+      ) {
         return this.createCacheMatchResult(item, newRecord.type, i);
       }
       if (
@@ -536,6 +626,7 @@ export class TaskCache {
     return {
       cacheContent: item,
       cacheUsable: true,
+      scopeMatch: 'exact',
       updateFn: (cb: (cache: T) => void) => {
         cb(item);
 
@@ -555,6 +646,20 @@ export class TaskCache {
       },
     };
   }
+
+  private recordCacheHitInMemory(record: PlanningCache | LocateCache): void {
+    const now = new Date().toISOString();
+    record.stats = {
+      ...record.stats,
+      hitCount: (record.stats?.hitCount ?? 0) + 1,
+      lastHitAt: now,
+    };
+    record.state ??= {
+      status: 'active',
+      confidence: 1,
+      updatedAt: now,
+    };
+  }
 }
 
 function normalizeLocateCache(record: LocateCache): LocateCache {
@@ -563,6 +668,8 @@ function normalizeLocateCache(record: LocateCache): LocateCache {
   return {
     type: 'locate',
     prompt: record.prompt,
+    operation: record.operation,
+    scope: record.scope,
     cache,
   };
 }
@@ -573,7 +680,20 @@ function areLocateCachesEquivalent(
 ): boolean {
   const normalizedCurrent = normalizeLocateCache(current);
   const normalizedIncoming = normalizeLocateCache(incoming);
-  return isDeepStrictEqual(normalizedCurrent.cache, normalizedIncoming.cache);
+  if (!isDeepStrictEqual(normalizedCurrent.cache, normalizedIncoming.cache)) {
+    return false;
+  }
+  if (
+    normalizedCurrent.operation &&
+    normalizedIncoming.operation &&
+    normalizedCurrent.operation !== normalizedIncoming.operation
+  ) {
+    return false;
+  }
+  return (
+    matchCacheScope(normalizedCurrent.scope, normalizedIncoming.scope) !==
+    'mismatch'
+  );
 }
 
 function dedupeEquivalentLocateCaches(
@@ -602,4 +722,127 @@ function dedupeEquivalentLocateCaches(
   }
 
   return deduped;
+}
+
+function ensureWritableCacheMetadata(
+  record: PlanningCache | LocateCache,
+): void {
+  const now = new Date().toISOString();
+  record.state ??= {
+    status: 'active',
+    confidence: 1,
+    updatedAt: now,
+  };
+}
+
+function updateCacheVerificationState(
+  record: PlanningCache | LocateCache,
+  verification: CacheVerificationResult,
+): void {
+  const now = new Date().toISOString();
+  const currentStats = record.stats ?? {};
+  const lastVerification: CacheVerificationRecord = {
+    ...verification,
+    at: now,
+  };
+
+  if (verification.status === 'success') {
+    const confidence = Math.min(1, (record.state?.confidence ?? 0.95) + 0.05);
+    record.stats = {
+      ...currentStats,
+      successCount: (currentStats.successCount ?? 0) + 1,
+      lastSuccessAt: now,
+    };
+    record.state = {
+      status: 'active',
+      confidence,
+      updatedAt: now,
+    };
+    record.lastVerification = lastVerification;
+    return;
+  }
+
+  const failureCount = (currentStats.failureCount ?? 0) + 1;
+  const confidence = Math.max(0, (record.state?.confidence ?? 1) - 0.25);
+  record.stats = {
+    ...currentStats,
+    failureCount,
+    lastFailureAt: now,
+  };
+  record.state = {
+    status: failureCount >= CACHE_FAILURES_BEFORE_STALE ? 'stale' : 'degraded',
+    confidence,
+    reason: verification.reason,
+    updatedAt: now,
+  };
+  record.lastVerification = lastVerification;
+}
+
+function isCacheEntrySkipped(record: PlanningCache | LocateCache): boolean {
+  return (
+    record.state?.status === 'disabled' || record.state?.status === 'stale'
+  );
+}
+
+function valueToComparableString(value: unknown): string {
+  return String(value).trim();
+}
+
+function hasComparableScopeValue(value: unknown): boolean {
+  return (
+    value !== undefined &&
+    value !== null &&
+    Boolean(valueToComparableString(value))
+  );
+}
+
+export function matchCacheScope(
+  cachedScope?: CacheScope,
+  currentScope?: CacheScope,
+): CacheScopeMatch {
+  if (!cachedScope || !currentScope) {
+    return 'unknown';
+  }
+
+  const keys: Array<keyof CacheScope> = [
+    'interfaceType',
+    'url',
+    'packageName',
+    'activity',
+    'pageFingerprint',
+    'sdk',
+    'manufacturer',
+    'locale',
+    'orientation',
+    'displayId',
+    'appVersion',
+  ];
+  let comparedCount = 0;
+  let missingCurrentValue = false;
+
+  for (const key of keys) {
+    const cachedValue = cachedScope[key];
+    if (!hasComparableScopeValue(cachedValue)) {
+      continue;
+    }
+
+    const currentValue = currentScope[key];
+    if (!hasComparableScopeValue(currentValue)) {
+      missingCurrentValue = true;
+      continue;
+    }
+
+    comparedCount += 1;
+    if (
+      valueToComparableString(cachedValue) !==
+      valueToComparableString(currentValue)
+    ) {
+      return 'mismatch';
+    }
+  }
+
+  if (comparedCount === 0) {
+    return 'unknown';
+  }
+  return missingCurrentValue ? 'compatible' : 'exact';
 }

@@ -64,6 +64,7 @@ import {
 import { getDebug } from '@midscene/shared/logger';
 import { assert, ifInBrowser, uuid } from '@midscene/shared/utils';
 import { defineActionSleep } from '../device';
+import { captureCacheScope } from './cache-scope';
 import {
   type FlowMacro,
   type FlowMacroName,
@@ -1063,10 +1064,13 @@ export class Agent<
       // if vlm-ui-tars or auto-glm, plan cache is not used
       const isVlmUiTars = isUITars(modelConfigForPlanning.modelFamily);
       const isAutoGlm = isAutoGLM(modelConfigForPlanning.modelFamily);
+      const cacheScope = this.taskCache
+        ? await captureCacheScope(this.interface)
+        : undefined;
       const matchedCache =
         isVlmUiTars || isAutoGlm || cacheable === false
           ? undefined
-          : this.taskCache?.matchPlanCache(taskPrompt);
+          : this.taskCache?.matchPlanCache(taskPrompt, cacheScope);
       if (
         matchedCache?.cacheUsable &&
         this.taskCache?.isCacheResultUsed &&
@@ -1080,8 +1084,29 @@ export class Agent<
 
         debug('matched cache, will call .runYaml to run the action');
         const yaml = matchedCache.cacheContent.yamlWorkflow;
-        await this.runYaml(yaml);
+        try {
+          await this.runYaml(yaml);
+          this.taskCache.recordCacheVerification(matchedCache.cacheContent, {
+            status: 'success',
+            source: 'runYaml',
+          });
+        } catch (error: any) {
+          this.taskCache.recordCacheVerification(matchedCache.cacheContent, {
+            status: 'failure',
+            source: 'runYaml',
+            reason: error?.message || String(error),
+          });
+          throw error;
+        }
         return;
+      }
+
+      if (matchedCache && !matchedCache.cacheUsable) {
+        this.taskCache?.recordCacheVerification(matchedCache.cacheContent, {
+          status: 'failure',
+          source: 'plan-cache-validation',
+          reason: 'cached YAML workflow is empty or invalid',
+        });
       }
 
       // If cache matched but is not executable, fall through to normal execution
@@ -1121,6 +1146,7 @@ export class Agent<
           {
             type: 'plan',
             prompt: taskPrompt,
+            scope: cacheScope,
             yamlWorkflow: yamlFlowStr,
           },
           matchedCache,

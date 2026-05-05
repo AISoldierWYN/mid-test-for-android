@@ -12,7 +12,17 @@ export {
   typeStr,
 } from './ui-utils';
 
-export { type LocateCache, type PlanningCache, TaskCache } from './task-cache';
+export {
+  type CacheEntryState,
+  type CacheEntryStats,
+  type CacheScope,
+  type CacheScopeMatch,
+  type CacheVerificationRecord,
+  type CacheVerificationResult,
+  type LocateCache,
+  type PlanningCache,
+  TaskCache,
+} from './task-cache';
 export { cacheFileExt } from './task-cache';
 export {
   PageExperienceGraph,

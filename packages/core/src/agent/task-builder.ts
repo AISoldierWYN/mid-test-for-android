@@ -25,6 +25,7 @@ import type { IModelConfig } from '@midscene/shared/env';
 import { generateElementByRect } from '@midscene/shared/extractor';
 import { getDebug } from '@midscene/shared/logger';
 import { assert } from '@midscene/shared/utils';
+import { captureCacheScope } from './cache-scope';
 import { normalizeCandidateAdjudicationConfig } from './recovery';
 import type { TaskCache } from './task-cache';
 import {
@@ -177,7 +178,13 @@ export class TaskBuilder {
     plan: PlanningAction<PlanningLocateParam>,
     context: PlanBuildContext,
   ): Promise<void> {
-    const taskLocate = this.createLocateTask(plan, plan.param, context);
+    const taskLocate = this.createLocateTask(
+      plan,
+      plan.param,
+      context,
+      undefined,
+      'Locate',
+    );
     context.tasks.push(taskLocate);
   }
 
@@ -221,6 +228,7 @@ export class TaskBuilder {
           (result) => {
             param[field] = result;
           },
+          planType,
         );
         context.tasks.push(locateTask);
       } else {
@@ -362,6 +370,7 @@ export class TaskBuilder {
     detailedLocateParam: DetailedLocateParam | string,
     context: PlanBuildContext,
     onResult?: (result: LocateResultElement) => void,
+    operationType = 'Locate',
   ): ExecutionTaskPlanningLocateApply {
     const { cacheable, modelConfigForDefaultIntent, deepLocate, abortSignal } =
       context;
@@ -483,7 +492,13 @@ export class TaskBuilder {
         const isXpathHit = !!elementFromXpath;
 
         const cachePrompt = param.prompt;
-        const locateCacheRecord = this.taskCache?.matchLocateCache(cachePrompt);
+        const cacheScope = this.taskCache
+          ? await captureCacheScope(this.interface)
+          : undefined;
+        const locateCacheRecord = this.taskCache?.matchLocateCache(
+          cachePrompt,
+          cacheScope,
+        );
         const cacheEntry = locateCacheRecord?.cacheContent?.cache;
 
         const elementFromCacheResult =
@@ -498,6 +513,29 @@ export class TaskBuilder {
                 cachePrompt,
                 param.cacheable,
               );
+
+        if (
+          locateCacheRecord &&
+          cacheEntry &&
+          param.cacheable !== false &&
+          this.interface.rectMatchesCacheFeature &&
+          !isPlanHit &&
+          !isXpathHit
+        ) {
+          this.taskCache?.recordCacheVerification(
+            locateCacheRecord.cacheContent,
+            elementFromCacheResult
+              ? {
+                  status: 'success',
+                  source: 'rectMatchesCacheFeature',
+                }
+              : {
+                  status: 'failure',
+                  source: 'rectMatchesCacheFeature',
+                  reason: 'cached selector did not resolve on current UI',
+                },
+          );
+        }
 
         // elementFromCacheResult is in logical coordinates, which should be transformed to screenshot coordinates;
         const elementFromCache = elementFromCacheResult
@@ -712,6 +750,8 @@ export class TaskBuilder {
                   {
                     type: 'locate',
                     prompt: cachePrompt,
+                    operation: operationType,
+                    scope: cacheScope,
                     cache: feature,
                   },
                   locateCacheRecord,
