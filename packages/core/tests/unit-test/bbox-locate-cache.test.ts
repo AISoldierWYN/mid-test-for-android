@@ -215,7 +215,15 @@ describe('bbox locate cache fix', () => {
       expect(cachedLocate).toBeDefined();
       expect(cachedLocate?.cache).toBeDefined();
       expect(cachedLocate?.cache?.xpaths).toContain('/html/body/input[1]');
-      expect(cachedLocate?.operation).toBe('Tap');
+      expect(cachedLocate?.operation).toBe('tap');
+      expect(cachedLocate?.operationKey).toBe(
+        'type=tap|target=search input box|gesture=tap',
+      );
+      expect(cachedLocate?.operationSignature).toMatchObject({
+        type: 'tap',
+        target: 'search input box',
+        gesture: 'tap',
+      });
       expect(cachedLocate?.scope).toMatchObject({
         interfaceType: 'web',
         packageName: 'com.example.app',
@@ -471,7 +479,7 @@ describe('bbox locate cache fix', () => {
       internal.cache.caches.push({
         type: 'locate',
         prompt: 'settings row',
-        operation: 'Tap',
+        operation: 'tap',
         scope: {
           interfaceType: 'web',
           packageName: 'com.android.settings',

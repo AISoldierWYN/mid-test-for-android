@@ -22,6 +22,7 @@ import {
   type PathExperienceDemotionOptions,
   type PathExperienceInput,
 } from './experience';
+import type { CanonicalOperation, OperationIR } from './operation-ir';
 import { getMidsceneVersion } from './utils';
 
 const DEFAULT_CACHE_MAX_FILENAME_LENGTH = 200;
@@ -81,28 +82,44 @@ export interface PlanningCache extends CacheEntryMetadata {
   type: 'plan';
   prompt: string;
   yamlWorkflow: string;
+  operationKey?: string;
+  operation?: OperationIR;
 }
 
 export interface LocateCache extends CacheEntryMetadata {
   type: 'locate';
   prompt: TUserPrompt;
   operation?: string;
+  operationKey?: string;
+  operationSignature?: CanonicalOperation;
   cache?: ElementCacheFeature;
   /** @deprecated kept for backward compatibility */
   xpaths?: string[];
 }
 
-export interface MatchCacheResult<T extends PlanningCache | LocateCache> {
+export interface OperationCache extends CacheEntryMetadata {
+  type: 'operation';
+  prompt: string;
+  operationKey: string;
+  operation: OperationIR;
+  yamlWorkflow: string;
+}
+
+export type CacheRecord = PlanningCache | OperationCache | LocateCache;
+
+export interface MatchCacheResult<T extends CacheRecord> {
   cacheContent: T;
   cacheUsable: boolean;
   scopeMatch?: CacheScopeMatch;
   updateFn: (cb: (cache: T) => void) => void;
 }
 
+type AnyMatchCacheResult = MatchCacheResult<any>;
+
 export type CacheFileContent = {
   midsceneVersion: string;
   cacheId: string;
-  caches: Array<PlanningCache | LocateCache>;
+  caches: CacheRecord[];
   flowMacros?: FlowMacro[];
   experience?: PageExperienceGraphSnapshot;
 };
@@ -197,6 +214,7 @@ export class TaskCache {
     prompt: TUserPrompt,
     type: 'plan' | 'locate',
     scope?: CacheScope,
+    operationKey?: string,
   ): MatchCacheResult<PlanningCache | LocateCache> | undefined {
     if (!this.isCacheResultUsed) {
       return undefined;
@@ -210,7 +228,7 @@ export class TaskCache {
       const scopeMatch = matchCacheScope(item.scope, scope);
       if (
         item.type === type &&
-        isDeepStrictEqual(item.prompt, prompt) &&
+        cacheIdentityMatches(item, prompt, operationKey) &&
         scopeMatch !== 'mismatch' &&
         !isCacheEntrySkipped(item) &&
         !this.matchedCacheIndices.has(key)
@@ -271,8 +289,9 @@ export class TaskCache {
   matchPlanCache(
     prompt: string,
     scope?: CacheScope,
+    operationKey?: string,
   ): MatchCacheResult<PlanningCache> | undefined {
-    const result = this.matchCache(prompt, 'plan', scope) as
+    const result = this.matchCache(prompt, 'plan', scope, operationKey) as
       | MatchCacheResult<PlanningCache>
       | undefined;
     if (!result) return undefined;
@@ -314,14 +333,67 @@ export class TaskCache {
   matchLocateCache(
     prompt: TUserPrompt,
     scope?: CacheScope,
+    operationKey?: string,
   ): MatchCacheResult<LocateCache> | undefined {
-    return this.matchCache(prompt, 'locate', scope) as
+    return this.matchCache(prompt, 'locate', scope, operationKey) as
       | MatchCacheResult<LocateCache>
       | undefined;
   }
 
+  matchOperationCache(
+    operationKey: string | undefined,
+    scope?: CacheScope,
+  ): MatchCacheResult<OperationCache> | undefined {
+    if (!operationKey || !this.isCacheResultUsed) {
+      return undefined;
+    }
+
+    for (let i = 0; i < this.cacheOriginalLength; i++) {
+      const item = this.cache.caches[i];
+      if (item.type !== 'operation') {
+        continue;
+      }
+      const key = `operation:${operationKey}:${i}`;
+      const scopeMatch = matchCacheScope(item.scope, scope);
+      if (
+        item.operationKey === operationKey &&
+        item.yamlWorkflow?.trim() &&
+        scopeMatch !== 'mismatch' &&
+        !isCacheEntrySkipped(item) &&
+        !this.matchedCacheIndices.has(key)
+      ) {
+        this.matchedCacheIndices.add(key);
+        this.recordCacheHitInMemory(item);
+        debug(
+          'operation cache found and marked as used, key: %s, index: %d, scopeMatch: %s',
+          operationKey,
+          i,
+          scopeMatch,
+        );
+        return {
+          cacheContent: item,
+          cacheUsable: true,
+          scopeMatch,
+          updateFn: (cb: (cache: OperationCache) => void) => {
+            cb(item);
+
+            if (this.readOnlyMode) {
+              debug(
+                'read-only mode, operation cache updated in memory but not flushed to file',
+              );
+              return;
+            }
+
+            this.flushCacheToFile();
+          },
+        };
+      }
+    }
+    return undefined;
+  }
+
   recordCacheVerification(
-    record: PlanningCache | LocateCache | undefined,
+    record: CacheRecord | undefined,
     verification: CacheVerificationResult,
   ): void {
     if (!record) {
@@ -335,7 +407,7 @@ export class TaskCache {
     this.flushCacheToFile();
   }
 
-  appendCache(cache: PlanningCache | LocateCache) {
+  appendCache(cache: CacheRecord) {
     ensureWritableCacheMetadata(cache);
     debug('will append cache', cache);
     this.cache.caches.push(cache);
@@ -521,9 +593,7 @@ export class TaskCache {
       // Sort caches to ensure plan entries come before locate entries for better readability
       // Create a sorted copy for writing to disk while keeping in-memory order unchanged
       const sortedCaches = [...this.cache.caches].sort((a, b) => {
-        if (a.type === 'plan' && b.type === 'locate') return -1;
-        if (a.type === 'locate' && b.type === 'plan') return 1;
-        return 0;
+        return cacheRecordSortOrder(a.type) - cacheRecordSortOrder(b.type);
       });
 
       const cacheToWrite = {
@@ -553,8 +623,8 @@ export class TaskCache {
   }
 
   updateOrAppendCacheRecord(
-    newRecord: PlanningCache | LocateCache,
-    cachedRecord?: MatchCacheResult<PlanningCache | LocateCache>,
+    newRecord: CacheRecord,
+    cachedRecord?: AnyMatchCacheResult,
   ) {
     ensureWritableCacheMetadata(newRecord);
     if (cachedRecord) {
@@ -565,12 +635,29 @@ export class TaskCache {
           planCache.yamlWorkflow = newRecord.yamlWorkflow;
           planCache.scope = newRecord.scope ?? planCache.scope;
           planCache.state = newRecord.state ?? planCache.state;
+          planCache.operationKey =
+            newRecord.operationKey ?? planCache.operationKey;
+          planCache.operation = newRecord.operation ?? planCache.operation;
+        });
+      } else if (newRecord.type === 'operation') {
+        cachedRecord.updateFn((cache) => {
+          const operationCache = cache as OperationCache;
+          operationCache.prompt = newRecord.prompt;
+          operationCache.operation = newRecord.operation;
+          operationCache.operationKey = newRecord.operationKey;
+          operationCache.yamlWorkflow = newRecord.yamlWorkflow;
+          operationCache.scope = newRecord.scope ?? operationCache.scope;
+          operationCache.state = newRecord.state ?? operationCache.state;
         });
       } else {
         cachedRecord.updateFn((cache) => {
           const locateCache = cache as LocateCache;
           locateCache.cache = newRecord.cache;
           locateCache.operation = newRecord.operation ?? locateCache.operation;
+          locateCache.operationKey =
+            newRecord.operationKey ?? locateCache.operationKey;
+          locateCache.operationSignature =
+            newRecord.operationSignature ?? locateCache.operationSignature;
           locateCache.scope = newRecord.scope ?? locateCache.scope;
           locateCache.state = newRecord.state ?? locateCache.state;
           if ('xpaths' in locateCache) {
@@ -590,12 +677,29 @@ export class TaskCache {
   }
 
   private findEquivalentCacheRecord(
-    newRecord: PlanningCache | LocateCache,
-  ): MatchCacheResult<PlanningCache | LocateCache> | undefined {
+    newRecord: CacheRecord,
+  ): MatchCacheResult<CacheRecord> | undefined {
     for (let i = 0; i < this.cache.caches.length; i++) {
       const item = this.cache.caches[i];
       if (item.type !== newRecord.type) {
         continue;
+      }
+      if (!isDeepStrictEqual(item.prompt, newRecord.prompt)) {
+        if (
+          item.type !== 'operation' ||
+          newRecord.type !== 'operation' ||
+          item.operationKey !== newRecord.operationKey
+        ) {
+          continue;
+        }
+      }
+      if (
+        item.type === 'operation' &&
+        newRecord.type === 'operation' &&
+        item.operationKey === newRecord.operationKey &&
+        matchCacheScope(item.scope, newRecord.scope) !== 'mismatch'
+      ) {
+        return this.createCacheMatchResult(item, newRecord.type, i);
       }
       if (!isDeepStrictEqual(item.prompt, newRecord.prompt)) {
         continue;
@@ -618,7 +722,7 @@ export class TaskCache {
     return undefined;
   }
 
-  private createCacheMatchResult<T extends PlanningCache | LocateCache>(
+  private createCacheMatchResult<T extends CacheRecord>(
     item: T,
     type: T['type'],
     index: number,
@@ -647,7 +751,7 @@ export class TaskCache {
     };
   }
 
-  private recordCacheHitInMemory(record: PlanningCache | LocateCache): void {
+  private recordCacheHitInMemory(record: CacheRecord): void {
     const now = new Date().toISOString();
     record.stats = {
       ...record.stats,
@@ -669,6 +773,8 @@ function normalizeLocateCache(record: LocateCache): LocateCache {
     type: 'locate',
     prompt: record.prompt,
     operation: record.operation,
+    operationKey: record.operationKey,
+    operationSignature: record.operationSignature,
     scope: record.scope,
     cache,
   };
@@ -684,6 +790,13 @@ function areLocateCachesEquivalent(
     return false;
   }
   if (
+    normalizedCurrent.operationKey &&
+    normalizedIncoming.operationKey &&
+    normalizedCurrent.operationKey !== normalizedIncoming.operationKey
+  ) {
+    return false;
+  }
+  if (
     normalizedCurrent.operation &&
     normalizedIncoming.operation &&
     normalizedCurrent.operation !== normalizedIncoming.operation
@@ -696,10 +809,8 @@ function areLocateCachesEquivalent(
   );
 }
 
-function dedupeEquivalentLocateCaches(
-  caches: Array<PlanningCache | LocateCache>,
-): Array<PlanningCache | LocateCache> {
-  const deduped: Array<PlanningCache | LocateCache> = [];
+function dedupeEquivalentLocateCaches(caches: CacheRecord[]): CacheRecord[] {
+  const deduped: CacheRecord[] = [];
 
   for (const cache of caches) {
     if (cache.type !== 'locate') {
@@ -724,9 +835,13 @@ function dedupeEquivalentLocateCaches(
   return deduped;
 }
 
-function ensureWritableCacheMetadata(
-  record: PlanningCache | LocateCache,
-): void {
+function cacheRecordSortOrder(type: CacheRecord['type']): number {
+  if (type === 'plan') return 0;
+  if (type === 'operation') return 1;
+  return 2;
+}
+
+function ensureWritableCacheMetadata(record: CacheRecord): void {
   const now = new Date().toISOString();
   record.state ??= {
     status: 'active',
@@ -736,7 +851,7 @@ function ensureWritableCacheMetadata(
 }
 
 function updateCacheVerificationState(
-  record: PlanningCache | LocateCache,
+  record: CacheRecord,
   verification: CacheVerificationResult,
 ): void {
   const now = new Date().toISOString();
@@ -778,9 +893,24 @@ function updateCacheVerificationState(
   record.lastVerification = lastVerification;
 }
 
-function isCacheEntrySkipped(record: PlanningCache | LocateCache): boolean {
+function isCacheEntrySkipped(record: CacheRecord): boolean {
   return (
     record.state?.status === 'disabled' || record.state?.status === 'stale'
+  );
+}
+
+function cacheIdentityMatches(
+  item: PlanningCache | LocateCache,
+  prompt: TUserPrompt,
+  operationKey?: string,
+): boolean {
+  const itemOperationKey = item.operationKey;
+  if (operationKey && itemOperationKey && itemOperationKey !== operationKey) {
+    return false;
+  }
+  return (
+    isDeepStrictEqual(item.prompt, prompt) ||
+    Boolean(operationKey && itemOperationKey === operationKey)
   );
 }
 

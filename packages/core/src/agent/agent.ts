@@ -77,6 +77,11 @@ import {
   createFlowMacro,
 } from './experience';
 import {
+  buildOperationIRFromYamlFlow,
+  operationHasSensitiveValue,
+  parseNaturalLanguageOperation,
+} from './operation-ir';
+import {
   formatExperienceGraphForPlanning,
   normalizeCandidateAdjudicationConfig,
 } from './recovery';
@@ -1067,35 +1072,52 @@ export class Agent<
       const cacheScope = this.taskCache
         ? await captureCacheScope(this.interface)
         : undefined;
+      const promptOperation = parseNaturalLanguageOperation(taskPrompt);
+      const promptOperationCacheable =
+        promptOperation && !operationHasSensitiveValue(promptOperation);
       const matchedCache =
         isVlmUiTars || isAutoGlm || cacheable === false
           ? undefined
           : this.taskCache?.matchPlanCache(taskPrompt, cacheScope);
+      const matchedOperationCache =
+        matchedCache || isVlmUiTars || isAutoGlm || cacheable === false
+          ? undefined
+          : this.taskCache?.matchOperationCache(
+              promptOperationCacheable ? promptOperation.key : undefined,
+              cacheScope,
+            );
+      const matchedYamlCache = matchedCache ?? matchedOperationCache;
       if (
-        matchedCache?.cacheUsable &&
+        matchedYamlCache?.cacheUsable &&
         this.taskCache?.isCacheResultUsed &&
-        matchedCache.cacheContent?.yamlWorkflow?.trim()
+        matchedYamlCache.cacheContent?.yamlWorkflow?.trim()
       ) {
         // log into report file
         await this.taskExecutor.loadYamlFlowAsPlanning(
           taskPrompt,
-          matchedCache.cacheContent.yamlWorkflow,
+          matchedYamlCache.cacheContent.yamlWorkflow,
         );
 
         debug('matched cache, will call .runYaml to run the action');
-        const yaml = matchedCache.cacheContent.yamlWorkflow;
+        const yaml = matchedYamlCache.cacheContent.yamlWorkflow;
         try {
           await this.runYaml(yaml);
-          this.taskCache.recordCacheVerification(matchedCache.cacheContent, {
-            status: 'success',
-            source: 'runYaml',
-          });
+          this.taskCache.recordCacheVerification(
+            matchedYamlCache.cacheContent,
+            {
+              status: 'success',
+              source: 'runYaml',
+            },
+          );
         } catch (error: any) {
-          this.taskCache.recordCacheVerification(matchedCache.cacheContent, {
-            status: 'failure',
-            source: 'runYaml',
-            reason: error?.message || String(error),
-          });
+          this.taskCache.recordCacheVerification(
+            matchedYamlCache.cacheContent,
+            {
+              status: 'failure',
+              source: 'runYaml',
+              reason: error?.message || String(error),
+            },
+          );
           throw error;
         }
         return;
@@ -1133,6 +1155,14 @@ export class Agent<
         actionOutput?.yamlFlow?.length &&
         cacheable !== false
       ) {
+        const operationFromYaml = buildOperationIRFromYamlFlow(
+          actionOutput.yamlFlow,
+        );
+        const operationForCache = promptOperation ?? operationFromYaml;
+        const operationForOperationCache =
+          operationForCache && !operationHasSensitiveValue(operationForCache)
+            ? operationForCache
+            : undefined;
         const yamlContent: MidsceneYamlScript = {
           tasks: [
             {
@@ -1147,10 +1177,25 @@ export class Agent<
             type: 'plan',
             prompt: taskPrompt,
             scope: cacheScope,
+            operationKey: operationForCache?.key,
+            operation: operationForCache,
             yamlWorkflow: yamlFlowStr,
           },
           matchedCache,
         );
+        if (operationForOperationCache) {
+          this.taskCache.updateOrAppendCacheRecord(
+            {
+              type: 'operation',
+              prompt: taskPrompt,
+              scope: cacheScope,
+              operationKey: operationForOperationCache.key,
+              operation: operationForOperationCache,
+              yamlWorkflow: yamlFlowStr,
+            },
+            matchedOperationCache,
+          );
+        }
       }
 
       return actionOutput?.output;

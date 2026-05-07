@@ -15,11 +15,13 @@ export {
 export {
   type CacheEntryState,
   type CacheEntryStats,
+  type CacheRecord,
   type CacheScope,
   type CacheScopeMatch,
   type CacheVerificationRecord,
   type CacheVerificationResult,
   type LocateCache,
+  type OperationCache,
   type PlanningCache,
   TaskCache,
 } from './task-cache';
@@ -63,6 +65,23 @@ export type {
   CompactLocateCandidate,
   CompactRecoveryEvidence,
 } from './recovery';
+export {
+  OPERATION_IR_VERSION,
+  buildCanonicalOperationFromAction,
+  buildOperationIRFromActionPlan,
+  buildOperationIRFromPlans,
+  buildOperationIRFromYamlFlow,
+  buildOperationKey,
+  canonicalizeActionType,
+  operationHasSensitiveValue,
+  parseNaturalLanguageOperation,
+} from './operation-ir';
+export type {
+  CanonicalOperation,
+  CanonicalOperationType,
+  OperationIR,
+  OperationIRSource,
+} from './operation-ir';
 
 export { TaskExecutor } from './tasks';
 

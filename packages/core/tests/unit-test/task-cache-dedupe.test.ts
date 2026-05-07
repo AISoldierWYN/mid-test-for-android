@@ -102,7 +102,8 @@ describe('TaskCache locate cache reuse and dedupe', () => {
     internal.cache.caches.push({
       type: 'locate',
       prompt: 'WLAN option',
-      operation: 'Tap',
+      operation: 'tap',
+      operationKey: 'type=tap|target=wlan option|gesture=tap',
       scope: {
         interfaceType: 'android',
         packageName: 'com.android.settings',
@@ -133,12 +134,54 @@ describe('TaskCache locate cache reuse and dedupe', () => {
     expect(match?.scopeMatch).toBe('exact');
   });
 
+  it('matches operation cache by canonical key across equivalent prompts', () => {
+    const taskCache = new TaskCache(uuid(), true);
+    const internal = getTaskCacheInternal(taskCache);
+    internal.cache.caches.push({
+      type: 'operation',
+      prompt: '点击 WLAN 选项',
+      operationKey: 'type=tap|target=wlan 选项|gesture=tap',
+      operation: {
+        version: 1,
+        source: 'deterministic-parser',
+        key: 'type=tap|target=wlan 选项|gesture=tap',
+        summary: 'tap wlan 选项',
+        operations: [
+          {
+            type: 'tap',
+            target: 'wlan 选项',
+            gesture: 'tap',
+          },
+        ],
+      },
+      scope: {
+        interfaceType: 'android',
+        packageName: 'com.android.settings',
+      },
+      yamlWorkflow:
+        'tasks:\n  - name: 点击 WLAN 选项\n    flow:\n      - Tap: ""\n        locate:\n          prompt: WLAN 选项\n',
+    });
+    internal.cacheOriginalLength = 1;
+
+    const match = taskCache.matchOperationCache(
+      'type=tap|target=wlan 选项|gesture=tap',
+      {
+        interfaceType: 'android',
+        packageName: 'com.android.settings',
+      },
+    );
+
+    expect(match).toBeDefined();
+    expect(match?.cacheContent.prompt).toBe('点击 WLAN 选项');
+    expect(match?.cacheContent.operation.summary).toBe('tap wlan 选项');
+  });
+
   it('records cache verification and degrades stale entries safely', () => {
     const taskCache = new TaskCache(uuid(), true);
     const locateRecord = {
       type: 'locate' as const,
       prompt: 'Submit button',
-      operation: 'Tap',
+      operation: 'tap',
       cache: {
         xpaths: ['/hierarchy/node[1]'],
       },

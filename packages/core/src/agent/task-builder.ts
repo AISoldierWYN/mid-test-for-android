@@ -26,6 +26,11 @@ import { generateElementByRect } from '@midscene/shared/extractor';
 import { getDebug } from '@midscene/shared/logger';
 import { assert } from '@midscene/shared/utils';
 import { captureCacheScope } from './cache-scope';
+import {
+  type CanonicalOperation,
+  buildCanonicalOperationFromAction,
+  buildOperationKey,
+} from './operation-ir';
 import { normalizeCandidateAdjudicationConfig } from './recovery';
 import type { TaskCache } from './task-cache';
 import {
@@ -183,7 +188,7 @@ export class TaskBuilder {
       plan.param,
       context,
       undefined,
-      'Locate',
+      undefined,
     );
     context.tasks.push(taskLocate);
   }
@@ -228,7 +233,16 @@ export class TaskBuilder {
           (result) => {
             param[field] = result;
           },
-          planType,
+          buildCanonicalOperationFromAction(
+            planType,
+            {
+              ...param,
+              locate: param[field],
+            },
+            {
+              includeValueInKey: false,
+            },
+          ),
         );
         context.tasks.push(locateTask);
       } else {
@@ -370,7 +384,7 @@ export class TaskBuilder {
     detailedLocateParam: DetailedLocateParam | string,
     context: PlanBuildContext,
     onResult?: (result: LocateResultElement) => void,
-    operationType = 'Locate',
+    operationSignature?: CanonicalOperation,
   ): ExecutionTaskPlanningLocateApply {
     const { cacheable, modelConfigForDefaultIntent, deepLocate, abortSignal } =
       context;
@@ -495,9 +509,13 @@ export class TaskBuilder {
         const cacheScope = this.taskCache
           ? await captureCacheScope(this.interface)
           : undefined;
+        const operationKey = operationSignature
+          ? buildOperationKey([operationSignature])
+          : undefined;
         const locateCacheRecord = this.taskCache?.matchLocateCache(
           cachePrompt,
           cacheScope,
+          operationKey,
         );
         const cacheEntry = locateCacheRecord?.cacheContent?.cache;
 
@@ -750,7 +768,9 @@ export class TaskBuilder {
                   {
                     type: 'locate',
                     prompt: cachePrompt,
-                    operation: operationType,
+                    operation: operationSignature?.type,
+                    operationKey,
+                    operationSignature,
                     scope: cacheScope,
                     cache: feature,
                   },

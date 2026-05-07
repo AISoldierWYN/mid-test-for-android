@@ -829,6 +829,8 @@ wrong-action rate after cache hit
 
 ### Phase B: Operation IR
 
+状态：已完成第一版实现。已引入独立 Operation IR、常见自然语言命令 deterministic parser、action/YAML 到 canonical operation 的转换，并增加 scoped operation cache，用于在等价命令下复用已验证的 YAML workflow。
+
 交付：
 
 - 引入 canonical operation model：
