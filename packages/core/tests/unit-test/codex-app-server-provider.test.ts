@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { normalize } from 'node:path';
 import {
   __shutdownCodexAppServerForTests,
   buildCodexTurnPayloadFromMessages,
@@ -147,7 +148,7 @@ describe('codex app-server provider helper', () => {
     });
     expect(payload.input).toContainEqual({
       type: 'localImage',
-      path: '/tmp/local-shot.png',
+      path: normalize('/tmp/local-shot.png'),
     });
   });
 
@@ -206,7 +207,7 @@ describe('codex app-server provider helper', () => {
 
   it('normalizes file urls into platform-safe local image paths', () => {
     expect(normalizeCodexLocalImagePath('file:///tmp/local-shot.png')).toBe(
-      '/tmp/local-shot.png',
+      normalize('/tmp/local-shot.png'),
     );
     expect(
       normalizeCodexLocalImagePath('file:///C:/tmp/local-shot.png', 'win32'),

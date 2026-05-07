@@ -49,14 +49,18 @@ describe('fileChooserAccept relative path support', () => {
 
   it('should resolve relative path with ../', () => {
     // Build a path containing ../: tests/fixtures/../fixtures/path-test-file.txt
-    const parts = relativeFromCwd.split('/');
+    const parts = relativeFromCwd.split(/[\\/]+/);
     const parentDir = parts[parts.length - 2]; // 'fixtures'
+    const fileName = parts[parts.length - 1];
+    if (!parentDir || !fileName) {
+      throw new Error(`Unexpected relative path: ${relativeFromCwd}`);
+    }
     const withDotDot = join(
       ...parts.slice(0, -2),
       parentDir,
       '..',
       parentDir,
-      parts[parts.length - 1],
+      fileName,
     );
     const result = (agent as any).normalizeFileInput(withDotDot);
 
