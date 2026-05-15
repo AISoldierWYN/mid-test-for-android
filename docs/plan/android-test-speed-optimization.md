@@ -846,6 +846,8 @@ wrong-action rate after cache hit
 
 ### Phase C: Scoped Selector Engine
 
+状态：已完成第一版实现。Android UI tree 已增加 scoped selector，缓存特征会记录 target/parent/ancestor/sibling/row/container 签名；cache 回放会对候选打分并在重复控件歧义时 fallback；structured locate candidates 会携带 selector metadata、row/container context 和 ambiguity 信息。
+
 交付：
 
 - selector candidate scoring。

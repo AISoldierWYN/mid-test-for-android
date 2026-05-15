@@ -22,6 +22,14 @@ export {
   locateAndroidElementWithScore,
 } from './fast-locator';
 export {
+  buildAndroidCandidateMetadata,
+  buildAndroidScopedSelector,
+  collectScopedNodeContexts,
+  findScopedNodeContextAtPoint,
+  findScopedNodeContextForNode,
+  visibleContextText,
+} from './scoped-selector';
+export {
   AndroidHelperClient,
   DEFAULT_ANDROID_HELPER_ENDPOINT,
   DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT,
@@ -42,6 +50,11 @@ export type {
   AndroidFastLocatorMatch,
   AndroidFastLocatorOptions,
 } from './fast-locator';
+export type {
+  AndroidNodeSelectorSignature,
+  AndroidScopedNodeContext,
+  AndroidScopedSelector,
+} from './scoped-selector';
 export type {
   AndroidHelperAppCommand,
   AndroidHelperAppResult,

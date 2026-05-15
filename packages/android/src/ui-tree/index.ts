@@ -2,6 +2,19 @@ import { createHash } from 'node:crypto';
 import type { ElementCacheFeature, Rect, Size } from '@midscene/core';
 import { NodeType } from '@midscene/shared/constants';
 import type { ElementInfo, ElementNode } from '@midscene/shared/extractor';
+import {
+  type AndroidScopedNodeContext,
+  type AndroidScopedSelector,
+  buildAndroidScopedSelector,
+  collectScopedNodeContexts,
+  contextText,
+  findScopedNodeContextAtPoint,
+  findScopedNodeContextForNode,
+  rectDistance,
+  rectsApproximatelyEqual,
+  signatureScore,
+  textSimilarity,
+} from '../scoped-selector';
 
 export interface AndroidUiTreeScale {
   x: number;
@@ -26,6 +39,19 @@ export interface AndroidNodeFeature {
 export interface AndroidElementCacheFeature extends ElementCacheFeature {
   xpaths?: string[];
   android?: AndroidNodeFeature;
+  androidSelector?: AndroidScopedSelector;
+}
+
+export interface AndroidCacheFeatureCandidate {
+  rect: Rect;
+  node: ElementInfo;
+  confidence: number;
+  reasons: string[];
+  selector?: AndroidScopedSelector;
+}
+
+export interface AndroidCacheFeatureMatch extends AndroidCacheFeatureCandidate {
+  candidates: AndroidCacheFeatureCandidate[];
 }
 
 type ParsedAttributes = Record<string, string>;
@@ -100,23 +126,63 @@ export function buildAndroidCacheFeatureForPoint(
   center: [number, number],
   options?: { targetDescription?: string },
 ): AndroidElementCacheFeature {
-  const node = findSmallestNodeContainingPoint(tree, center);
-  if (!node) {
+  const context = findScopedNodeContextAtPoint(tree, center);
+  if (!context) {
     throw new Error(
       `No Android UI node contains point (${center[0]}, ${center[1]})`,
     );
   }
 
-  return buildCacheFeature(node, options?.targetDescription);
+  return buildCacheFeature(context, options?.targetDescription);
 }
 
 export function rectMatchesAndroidCacheFeature(
   tree: ElementNode,
   feature: ElementCacheFeature,
 ): Rect {
+  return matchAndroidCacheFeature(tree, feature).rect;
+}
+
+export function matchAndroidCacheFeature(
+  tree: ElementNode,
+  feature: ElementCacheFeature,
+  options?: { minConfidence?: number; ambiguityMargin?: number },
+): AndroidCacheFeatureMatch {
   const typedFeature = feature as AndroidElementCacheFeature;
   const xpaths = sanitizeStringArray(typedFeature.xpaths);
   const androidFeature = typedFeature.android;
+  const androidSelector = typedFeature.androidSelector;
+  const minConfidence = options?.minConfidence ?? 0.45;
+  const ambiguityMargin = options?.ambiguityMargin ?? 0.08;
+
+  if (androidFeature || androidSelector) {
+    const candidates = collectScopedNodeContexts(tree)
+      .filter((context) => context.node.isVisible)
+      .map((context) =>
+        scoreCacheCandidate(context, xpaths, androidFeature, androidSelector),
+      )
+      .filter((candidate) => candidate.confidence >= minConfidence)
+      .sort(compareCacheCandidates);
+
+    const best = candidates[0];
+    if (best) {
+      const competitor = candidates[1];
+      if (
+        competitor &&
+        best.confidence - competitor.confidence <= ambiguityMargin
+      ) {
+        throw new Error(
+          `Ambiguous Android cache feature: top candidates ${best.confidence.toFixed(
+            2,
+          )} and ${competitor.confidence.toFixed(2)} are too close`,
+        );
+      }
+      return {
+        ...best,
+        candidates: candidates.slice(0, 5),
+      };
+    }
+  }
 
   for (const xpath of xpaths) {
     const byXpath = findNodeByXpath(tree, xpath);
@@ -124,30 +190,39 @@ export function rectMatchesAndroidCacheFeature(
       byXpath &&
       (!androidFeature || nodeMatchesFeature(byXpath, androidFeature))
     ) {
-      return byXpath.rect;
-    }
-  }
-
-  if (androidFeature?.nodeHashId) {
-    const byHash = findFirstNode(tree, (node) => {
-      return node.nodeHashId === androidFeature.nodeHashId;
-    });
-    if (byHash) {
-      return byHash.rect;
+      return {
+        rect: byXpath.rect,
+        node: byXpath,
+        confidence: 1,
+        reasons: ['legacy-xpath'],
+        candidates: [],
+      };
     }
   }
 
   if (androidFeature?.resourceId) {
     const byResourceId = findBestNodeByFeature(tree, androidFeature);
     if (byResourceId) {
-      return byResourceId.rect;
+      return {
+        rect: byResourceId.rect,
+        node: byResourceId,
+        confidence: 0.8,
+        reasons: ['legacy-resource-id'],
+        candidates: [],
+      };
     }
   }
 
   if (androidFeature?.contentDesc || androidFeature?.text) {
     const byContent = findBestNodeByFeature(tree, androidFeature);
     if (byContent) {
-      return byContent.rect;
+      return {
+        rect: byContent.rect,
+        node: byContent,
+        confidence: 0.7,
+        reasons: ['legacy-content'],
+        candidates: [],
+      };
     }
   }
 
@@ -156,7 +231,13 @@ export function rectMatchesAndroidCacheFeature(
       rectsApproximatelyEqual(node.rect, androidFeature.bounds!),
     );
     if (byBounds) {
-      return byBounds.rect;
+      return {
+        rect: byBounds.rect,
+        node: byBounds,
+        confidence: 0.6,
+        reasons: ['legacy-bounds'],
+        candidates: [],
+      };
     }
   }
 
@@ -269,9 +350,10 @@ function createElementInfo(
 }
 
 function buildCacheFeature(
-  node: ElementInfo,
+  context: AndroidScopedNodeContext,
   targetDescription?: string,
 ): AndroidElementCacheFeature {
+  const node = context.node;
   return {
     xpaths: nodeXpaths(node),
     android: {
@@ -284,6 +366,7 @@ function buildCacheFeature(
       bounds: node.rect,
       targetDescription,
     },
+    androidSelector: buildAndroidScopedSelector(context),
   };
 }
 
@@ -319,23 +402,6 @@ function contentFromAttributes(attributes: ParsedAttributes): string {
   return [text, contentDesc]
     .filter((item, index, arr) => item && arr.indexOf(item) === index)
     .join(' ');
-}
-
-function findSmallestNodeContainingPoint(
-  tree: ElementNode,
-  center: [number, number],
-): ElementInfo | undefined {
-  const candidates: ElementInfo[] = [];
-  traverseNodes(tree, (node) => {
-    if (!node.isVisible) {
-      return;
-    }
-    if (pointInRect(center, node.rect)) {
-      candidates.push(node);
-    }
-  });
-
-  return candidates.sort((a, b) => rectArea(a.rect) - rectArea(b.rect))[0];
 }
 
 function findBestNodeByFeature(
@@ -423,34 +489,300 @@ function traverseNodes(tree: ElementNode, visit: (node: ElementInfo) => void) {
   }
 }
 
-function pointInRect(point: [number, number], rect: Rect): boolean {
-  return (
-    point[0] >= rect.left &&
-    point[0] < rect.left + rect.width &&
-    point[1] >= rect.top &&
-    point[1] < rect.top + rect.height
+function nodeXpaths(node: ElementInfo): string[] {
+  return sanitizeStringArray(node.xpaths);
+}
+
+function scoreCacheCandidate(
+  context: AndroidScopedNodeContext,
+  xpaths: string[],
+  feature: AndroidNodeFeature | undefined,
+  selector: AndroidScopedSelector | undefined,
+): AndroidCacheFeatureCandidate {
+  const reasons: string[] = [];
+  let score = 0;
+  let weight = 0;
+
+  if (feature && !nodeHasTargetIdentityMatch(context.node, feature)) {
+    return {
+      rect: context.node.rect,
+      node: context.node,
+      confidence: 0,
+      reasons: ['target-identity-mismatch'],
+      selector: selector ? buildAndroidScopedSelector(context) : undefined,
+    };
+  }
+
+  addScore(
+    xpaths.some((xpath) => nodeXpaths(context.node).includes(xpath)) ? 1 : 0,
+    xpaths.length ? 0.2 : 0,
+    'xpath',
+    reasons,
+    (value) => value === 1,
   );
+
+  if (feature?.nodeHashId) {
+    addScore(
+      context.node.nodeHashId === feature.nodeHashId ? 1 : 0,
+      0.16,
+      'node-hash',
+      reasons,
+      (value) => value === 1,
+    );
+  }
+
+  if (feature) {
+    const featureScore = scoreNodeFeature(context.node, feature, reasons);
+    score += featureScore.score;
+    weight += featureScore.weight;
+  }
+
+  if (selector) {
+    const selectorScore = scoreScopedSelector(context, selector, reasons);
+    score += selectorScore.score;
+    weight += selectorScore.weight;
+  }
+
+  let confidence = weight ? Math.min(1, score / weight) : 0;
+  const rowContext = selector
+    ? nearestComparableRowContext(context)
+    : undefined;
+  if (
+    selector?.rowText &&
+    textSimilarity(selector.rowText, contextText(rowContext?.tree)) < 0.75
+  ) {
+    confidence = Math.max(0, confidence - 0.3);
+    reasons.push('row-context-mismatch');
+  }
+
+  function addScore(
+    value: number,
+    valueWeight: number,
+    reason: string,
+    targetReasons: string[],
+    acceptReason: (score: number) => boolean = (item) => item >= 0.75,
+  ) {
+    if (!valueWeight) {
+      return;
+    }
+    score += value * valueWeight;
+    weight += valueWeight;
+    if (acceptReason(value)) {
+      targetReasons.push(reason);
+    }
+  }
+
+  return {
+    rect: context.node.rect,
+    node: context.node,
+    confidence,
+    reasons,
+    selector: selector ? buildAndroidScopedSelector(context) : undefined,
+  };
+}
+
+function nodeHasTargetIdentityMatch(
+  node: ElementInfo,
+  feature: AndroidNodeFeature,
+): boolean {
+  const identityChecks: Array<[unknown, unknown]> = [
+    [feature.resourceId, node.attributes.resourceId],
+    [feature.text, node.attributes.text],
+    [feature.contentDesc, node.attributes.contentDescription],
+    [feature.className, node.attributes.className],
+  ];
+  const comparable = identityChecks.filter(([expected]) => hasText(expected));
+  if (!comparable.length) {
+    return true;
+  }
+  return comparable.some(([expected, actual]) => {
+    return String(expected) === String(actual ?? '');
+  });
+}
+
+function scoreNodeFeature(
+  node: ElementInfo,
+  feature: AndroidNodeFeature,
+  reasons: string[],
+): { score: number; weight: number } {
+  let score = 0;
+  let weight = 0;
+  const checks: Array<[unknown, unknown, number, string]> = [
+    [feature.resourceId, node.attributes.resourceId, 0.26, 'resource-id'],
+    [feature.text, node.attributes.text, 0.16, 'text'],
+    [
+      feature.contentDesc,
+      node.attributes.contentDescription,
+      0.16,
+      'content-desc',
+    ],
+    [feature.className, node.attributes.className, 0.08, 'class'],
+    [feature.packageName, node.attributes.packageName, 0.06, 'package'],
+  ];
+
+  for (const [expected, actual, itemWeight, reason] of checks) {
+    if (!hasText(expected)) {
+      continue;
+    }
+    weight += itemWeight;
+    if (String(expected) === String(actual ?? '')) {
+      score += itemWeight;
+      reasons.push(reason);
+    }
+  }
+
+  if (feature.bounds) {
+    weight += 0.12;
+    if (rectsApproximatelyEqual(node.rect, feature.bounds)) {
+      score += 0.12;
+      reasons.push('bounds');
+    } else {
+      const distance = rectDistance(node.rect, feature.bounds);
+      const scaled = Math.max(0, 1 - distance / 240);
+      score += scaled * 0.12;
+      if (scaled >= 0.75) {
+        reasons.push('bounds-near');
+      }
+    }
+  }
+
+  return { score, weight };
+}
+
+function scoreScopedSelector(
+  context: AndroidScopedNodeContext,
+  selector: AndroidScopedSelector,
+  reasons: string[],
+): { score: number; weight: number } {
+  let score = 0;
+  let weight = 0;
+
+  addSignature(selector.target, context.node, 0.2, 'target');
+  addSignature(selector.parent, context.parent, 0.12, 'parent');
+  const rowContext = nearestComparableRowContext(context);
+  addSignature(selector.row, rowContext?.node, 0.12, 'row');
+  addText(selector.rowText, contextText(rowContext?.tree), 0.12, 'row-text');
+  const containerContext = nearestComparableContainerContext(context);
+  addSignature(selector.container, containerContext?.node, 0.08, 'container');
+  addText(
+    selector.containerText,
+    contextText(containerContext?.tree),
+    0.04,
+    'container-text',
+  );
+  addSignature(
+    selector.previousSibling,
+    context.siblingIndex > 0
+      ? context.siblings[context.siblingIndex - 1]
+      : undefined,
+    0.04,
+    'previous-sibling',
+  );
+  addSignature(
+    selector.nextSibling,
+    context.siblingIndex >= 0 &&
+      context.siblingIndex < context.siblings.length - 1
+      ? context.siblings[context.siblingIndex + 1]
+      : undefined,
+    0.04,
+    'next-sibling',
+  );
+  if (
+    typeof selector.siblingIndex === 'number' &&
+    typeof selector.siblingCount === 'number'
+  ) {
+    weight += 0.04;
+    if (
+      selector.siblingIndex === context.siblingIndex &&
+      selector.siblingCount === context.siblings.length
+    ) {
+      score += 0.04;
+      reasons.push('sibling-position');
+    }
+  }
+
+  function addSignature(
+    signature: AndroidScopedSelector['target'] | undefined,
+    node: ElementInfo | undefined,
+    itemWeight: number,
+    reason: string,
+  ) {
+    if (!signature) {
+      return;
+    }
+    const result = signatureScore(signature, node);
+    if (!result.compared) {
+      return;
+    }
+    weight += itemWeight;
+    score += result.score * itemWeight;
+    if (result.score >= 0.75) {
+      reasons.push(reason);
+    }
+  }
+
+  function addText(
+    expected: string | undefined,
+    actual: string,
+    itemWeight: number,
+    reason: string,
+  ) {
+    if (!hasText(expected)) {
+      return;
+    }
+    weight += itemWeight;
+    const similarity = textSimilarity(expected, actual);
+    score += similarity * itemWeight;
+    if (similarity >= 0.75) {
+      reasons.push(reason);
+    }
+  }
+
+  return { score, weight };
+}
+
+function nearestComparableRowContext(
+  context: AndroidScopedNodeContext,
+): AndroidScopedNodeContext | undefined {
+  return context.parent
+    ? findScopedNodeContextForNode(context.root, context.parent)
+    : undefined;
+}
+
+function nearestComparableContainerContext(
+  context: AndroidScopedNodeContext,
+): AndroidScopedNodeContext | undefined {
+  const container =
+    context.ancestors
+      .slice()
+      .reverse()
+      .find((node) => {
+        const className = node.attributes.className || '';
+        return (
+          node.attributes.scrollable === 'true' ||
+          /RecyclerView|ListView|ScrollView|ViewPager|GridView|LinearLayout/.test(
+            className,
+          ) ||
+          Boolean(node.attributes.resourceId)
+        );
+      }) ?? context.parent;
+  return container
+    ? findScopedNodeContextForNode(context.root, container)
+    : undefined;
+}
+
+function compareCacheCandidates(
+  first: AndroidCacheFeatureCandidate,
+  second: AndroidCacheFeatureCandidate,
+): number {
+  if (second.confidence !== first.confidence) {
+    return second.confidence - first.confidence;
+  }
+  return rectArea(first.rect) - rectArea(second.rect);
 }
 
 function rectArea(rect: Rect): number {
   return rect.width * rect.height;
-}
-
-function rectDistance(a: Rect, b: Rect): number {
-  return Math.abs(a.left - b.left) + Math.abs(a.top - b.top);
-}
-
-function rectsApproximatelyEqual(a: Rect, b: Rect): boolean {
-  return (
-    Math.abs(a.left - b.left) <= 2 &&
-    Math.abs(a.top - b.top) <= 2 &&
-    Math.abs(a.width - b.width) <= 2 &&
-    Math.abs(a.height - b.height) <= 2
-  );
-}
-
-function nodeXpaths(node: ElementInfo): string[] {
-  return sanitizeStringArray(node.xpaths);
 }
 
 function sanitizeStringArray(value: unknown): string[] {
@@ -507,4 +839,8 @@ function scaleValue(value: number, scale = 1): number {
 
 function emptyToUndefined(value: string | undefined): string | undefined {
   return value || undefined;
+}
+
+function hasText(value: unknown): boolean {
+  return value !== undefined && value !== null && String(value).trim() !== '';
 }

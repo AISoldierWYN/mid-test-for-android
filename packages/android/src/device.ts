@@ -1172,13 +1172,18 @@ ${Object.keys(size)
     }
 
     const minScore = typeof option === 'object' ? option.minScore : undefined;
+    const ambiguityMargin =
+      typeof option === 'object' ? option.ambiguityMargin : undefined;
     return this.diagnostics.time(
       'uiTree',
       'structuredLocate',
-      { prompt: promptToText(param.prompt), minScore },
+      { prompt: promptToText(param.prompt), minScore, ambiguityMargin },
       async () => {
         const tree = await this.getElementsNodeTree();
-        return locateAndroidElementByPrompt(tree, param.prompt, { minScore });
+        return locateAndroidElementByPrompt(tree, param.prompt, {
+          minScore,
+          ambiguityMargin,
+        });
       },
     );
   }
@@ -1205,16 +1210,24 @@ ${Object.keys(size)
       options?.maxCandidates ??
       (typeof option === 'object' ? option.maxCandidates : undefined) ??
       5;
+    const ambiguityMargin =
+      typeof option === 'object' ? option.ambiguityMargin : undefined;
 
     return this.diagnostics.time(
       'uiTree',
       'structuredLocateCandidates',
-      { prompt: promptToText(param.prompt), minScore, maxCandidates },
+      {
+        prompt: promptToText(param.prompt),
+        minScore,
+        maxCandidates,
+        ambiguityMargin,
+      },
       async () => {
         const tree = await this.getElementsNodeTree();
         return locateAndroidElementCandidates(tree, param.prompt, {
           minScore,
           maxCandidates,
+          ambiguityMargin,
         });
       },
     );

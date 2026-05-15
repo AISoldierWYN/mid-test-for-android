@@ -1,13 +1,18 @@
 import type { LocateCandidate, LocateResultElement } from '@midscene/core';
 import { NodeType } from '@midscene/shared/constants';
+import type { ElementInfo, ElementNode } from '@midscene/shared/extractor';
 import {
-  type ElementInfo,
-  type ElementNode,
-  treeToList,
-} from '@midscene/shared/extractor';
+  type AndroidScopedNodeContext,
+  buildAndroidCandidateMetadata,
+  buildAndroidScopedSelector,
+  collectScopedNodeContexts,
+  contextText,
+} from './scoped-selector';
 
 export interface AndroidFastLocatorOptions {
   minScore?: number;
+  ambiguityMargin?: number;
+  rejectAmbiguous?: boolean;
 }
 
 export interface AndroidFastLocatorMatch {
@@ -15,9 +20,16 @@ export interface AndroidFastLocatorMatch {
   confidence: number;
   node: ElementInfo;
   reason: string;
+  selector: ReturnType<typeof buildAndroidScopedSelector>;
+  ambiguous?: boolean;
+  ambiguity?: {
+    competitorCount: number;
+    margin: number;
+  };
 }
 
 const DEFAULT_MIN_SCORE = 0.72;
+const DEFAULT_AMBIGUITY_MARGIN = 0.08;
 
 const STOP_WORDS = new Set([
   'a',
@@ -66,9 +78,9 @@ export function locateAndroidElementWithScore(
   prompt: unknown,
   options?: AndroidFastLocatorOptions,
 ): AndroidFastLocatorMatch | null {
-  return (
-    locateAndroidElementCandidatesWithScore(tree, prompt, options)[0] ?? null
-  );
+  const match =
+    locateAndroidElementCandidatesWithScore(tree, prompt, options)[0] ?? null;
+  return match?.ambiguous && options?.rejectAmbiguous !== false ? null : match;
 }
 
 export function locateAndroidElementCandidates(
@@ -76,6 +88,7 @@ export function locateAndroidElementCandidates(
   prompt: unknown,
   options?: AndroidFastLocatorOptions & { maxCandidates?: number },
 ): LocateCandidate[] {
+  const contexts = collectScopedNodeContexts(tree);
   return locateAndroidElementCandidatesWithScore(tree, prompt, options).map(
     (match) => ({
       element: match.element,
@@ -83,12 +96,9 @@ export function locateAndroidElementCandidates(
       source: 'android-ui-tree',
       reason: match.reason,
       metadata: {
-        resourceId: match.node.attributes.resourceId,
-        text: match.node.attributes.text,
-        contentDescription: match.node.attributes.contentDescription,
-        className: match.node.attributes.className,
-        clickable: match.node.attributes.clickable,
-        xpaths: match.node.xpaths,
+        ...buildAndroidCandidateMetadata(contextFromMatch(contexts, match)),
+        ambiguous: match.ambiguous,
+        ambiguity: match.ambiguity,
       },
     }),
   );
@@ -106,12 +116,16 @@ export function locateAndroidElementCandidatesWithScore(
   }
 
   const minScore = options?.minScore ?? DEFAULT_MIN_SCORE;
-  return treeToList(tree)
-    .filter(isUsableNode)
-    .map((node) => scoreNode(node, promptNormalized))
+  const matches = collectScopedNodeContexts(tree)
+    .filter((context) => isUsableNode(context.node))
+    .map((context) => scoreNode(context, promptNormalized))
     .filter((match) => match.confidence >= minScore)
-    .sort(compareMatches)
-    .slice(0, options?.maxCandidates ?? 5);
+    .sort(compareMatches);
+
+  return markAmbiguousMatches(
+    matches.slice(0, options?.maxCandidates ?? 5),
+    options?.ambiguityMargin ?? DEFAULT_AMBIGUITY_MARGIN,
+  );
 }
 
 function promptToText(prompt: unknown): string {
@@ -128,9 +142,10 @@ function promptToText(prompt: unknown): string {
 }
 
 function scoreNode(
-  node: ElementInfo,
+  context: AndroidScopedNodeContext,
   promptNormalized: string,
 ): AndroidFastLocatorMatch {
+  const node = context.node;
   const attributes = node.attributes;
   const contentNormalized = normalizeText(
     [node.content, attributes.text, attributes.contentDescription].filter(
@@ -147,9 +162,17 @@ function scoreNode(
     resourceNormalized,
     classNormalized,
   ]);
+  const contextNormalized = normalizeText([
+    contextText(context.tree),
+    context.parent?.content,
+    context.parent?.attributes.resourceId,
+    ...context.siblings.map((sibling) => sibling.content),
+    ...context.ancestors.slice(-2).map((ancestor) => ancestor.content),
+  ]);
   const role = promptRole(promptNormalized);
   const intentTokens = promptTokens(promptNormalized);
   const promptOnlyRole = intentTokens.length === 0 && !!role;
+  const matchesPromptRole = role ? nodeMatchesRole(node, role) : false;
 
   const contentScore = textScore(
     promptNormalized,
@@ -166,17 +189,31 @@ function scoreNode(
     ) * 0.86;
   const combinedScore =
     tokenCoverage(intentTokens, combinedNormalized, true) * 0.74;
+  const contextScore =
+    tokenCoverage(intentTokens, contextNormalized, true) *
+    (role && !matchesPromptRole ? 0.45 : 0.82);
 
-  let confidence = Math.max(contentScore, resourceScore, combinedScore);
+  let confidence = Math.max(
+    contentScore,
+    resourceScore,
+    combinedScore,
+    contextScore,
+  );
   let reason = 'text';
 
-  if (resourceScore > contentScore && resourceScore >= combinedScore) {
+  if (
+    resourceScore > contentScore &&
+    resourceScore >= combinedScore &&
+    resourceScore >= contextScore
+  ) {
     reason = 'resource-id';
-  } else if (combinedScore > contentScore) {
+  } else if (combinedScore > contentScore && combinedScore >= contextScore) {
     reason = 'combined';
+  } else if (contextScore > contentScore) {
+    reason = 'context';
   }
 
-  if (role && nodeMatchesRole(node, role)) {
+  if (role && matchesPromptRole) {
     confidence += role === 'input' ? 0.14 : 0.1;
     reason = `${reason}+role`;
   }
@@ -209,6 +246,7 @@ function scoreNode(
     confidence,
     node,
     reason,
+    selector: buildAndroidScopedSelector(context),
   };
 }
 
@@ -230,6 +268,45 @@ function compareMatches(
   }
 
   return rectArea(first.node.rect) - rectArea(second.node.rect);
+}
+
+function markAmbiguousMatches(
+  matches: AndroidFastLocatorMatch[],
+  ambiguityMargin: number,
+): AndroidFastLocatorMatch[] {
+  const top = matches[0];
+  if (!top) {
+    return matches;
+  }
+  const competitors = matches.slice(1).filter((candidate) => {
+    return top.confidence - candidate.confidence <= ambiguityMargin;
+  });
+  if (!competitors.length) {
+    return matches;
+  }
+  return [
+    {
+      ...top,
+      ambiguous: true,
+      ambiguity: {
+        competitorCount: competitors.length,
+        margin: ambiguityMargin,
+      },
+      reason: `${top.reason}+ambiguous`,
+    },
+    ...matches.slice(1),
+  ];
+}
+
+function contextFromMatch(
+  contexts: AndroidScopedNodeContext[],
+  match: AndroidFastLocatorMatch,
+): AndroidScopedNodeContext {
+  const context = contexts.find((candidate) => candidate.node === match.node);
+  if (!context) {
+    throw new Error('Android structured locate candidate context not found');
+  }
+  return context;
 }
 
 function textScore(
@@ -349,7 +426,9 @@ function nodeMatchesRole(
     return (
       node.nodeType === NodeType.BUTTON ||
       node.nodeType === NodeType.A ||
-      node.attributes.clickable === 'true'
+      (node.attributes.clickable === 'true' &&
+        node.nodeType !== NodeType.FORM_ITEM &&
+        !node.attributes.className?.includes('EditText'))
     );
   }
 

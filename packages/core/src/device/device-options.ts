@@ -67,6 +67,8 @@ export type AndroidDeviceOpt = {
         minCandidateScore?: number;
         /** Maximum candidates passed to AI adjudication. Default: 5. */
         maxCandidates?: number;
+        /** Confidence delta below which similarly scored structured candidates are treated as ambiguous. Default: 0.08. */
+        ambiguityMargin?: number;
       };
   /**
    * Phase 3 Android system helper integration.

@@ -8,6 +8,7 @@ import {
 } from '../../src/fast-locator';
 import {
   buildAndroidCacheFeatureForPoint,
+  matchAndroidCacheFeature,
   parseBounds,
   parseUiautomatorXml,
   rectMatchesAndroidCacheFeature,
@@ -19,6 +20,38 @@ const sampleXml = String.raw`
   <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,0][200,400]">
     <node index="0" text="Sign in" resource-id="com.example:id/login" class="android.widget.Button" package="com.example" content-desc="Login button" clickable="true" enabled="true" bounds="[20,40][180,100]" />
     <node index="1" text="" resource-id="com.example:id/email" class="android.widget.EditText" package="com.example" content-desc="Email" clickable="true" enabled="true" bounds="[20,120][180,180]" />
+  </node>
+</hierarchy>
+`;
+
+const duplicateRowsXml = String.raw`
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="com.example:id/list" class="androidx.recyclerview.widget.RecyclerView" package="com.example" content-desc="" clickable="false" enabled="true" scrollable="true" bounds="[0,0][400,500]">
+    <node index="0" text="" resource-id="" class="android.widget.LinearLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,0][400,100]">
+      <node index="0" text="Alice" resource-id="com.example:id/name" class="android.widget.TextView" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[20,20][180,80]" />
+      <node index="1" text="Delete" resource-id="com.example:id/delete" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[260,20][380,80]" />
+    </node>
+    <node index="1" text="" resource-id="" class="android.widget.LinearLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,100][400,200]">
+      <node index="0" text="Bob" resource-id="com.example:id/name" class="android.widget.TextView" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[20,120][180,180]" />
+      <node index="1" text="Delete" resource-id="com.example:id/delete" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[260,120][380,180]" />
+    </node>
+  </node>
+</hierarchy>
+`;
+
+const duplicateRowsReorderedXml = String.raw`
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="com.example:id/list" class="androidx.recyclerview.widget.RecyclerView" package="com.example" content-desc="" clickable="false" enabled="true" scrollable="true" bounds="[0,0][400,500]">
+    <node index="0" text="" resource-id="" class="android.widget.LinearLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,0][400,100]">
+      <node index="0" text="Bob" resource-id="com.example:id/name" class="android.widget.TextView" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[20,20][180,80]" />
+      <node index="1" text="Delete" resource-id="com.example:id/delete" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[260,20][380,80]" />
+    </node>
+    <node index="1" text="" resource-id="" class="android.widget.LinearLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,100][400,200]">
+      <node index="0" text="Alice" resource-id="com.example:id/name" class="android.widget.TextView" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[20,120][180,180]" />
+      <node index="1" text="Delete" resource-id="com.example:id/delete" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[260,120][380,180]" />
+    </node>
   </node>
 </hierarchy>
 `;
@@ -61,6 +94,12 @@ describe('Android UI tree parser', () => {
       contentDesc: 'Login button',
       className: 'android.widget.Button',
       targetDescription: 'login button',
+    });
+    expect(feature.androidSelector).toMatchObject({
+      target: {
+        resourceId: 'com.example:id/login',
+        text: 'Sign in',
+      },
     });
   });
 
@@ -114,6 +153,39 @@ describe('Android UI tree parser', () => {
         },
       }),
     ).toEqual({ left: 10, top: 60, width: 80, height: 30 });
+  });
+
+  it('uses scoped row context when cached xpath points to a repeated element after reorder', () => {
+    const originalTree = parseUiautomatorXml(duplicateRowsXml);
+    const reorderedTree = parseUiautomatorXml(duplicateRowsReorderedXml);
+    const feature = buildAndroidCacheFeatureForPoint(originalTree, [320, 150], {
+      targetDescription: 'Bob delete button',
+    });
+
+    expect(feature.androidSelector?.rowText).toContain('Bob');
+
+    expect(rectMatchesAndroidCacheFeature(reorderedTree, feature)).toEqual({
+      left: 260,
+      top: 20,
+      width: 120,
+      height: 60,
+    });
+    const match = matchAndroidCacheFeature(reorderedTree, feature);
+    expect(match.reasons).toContain('row-text');
+  });
+
+  it('rejects ambiguous cache matches when repeated controls have no scoped context', () => {
+    const tree = parseUiautomatorXml(duplicateRowsXml);
+
+    expect(() =>
+      rectMatchesAndroidCacheFeature(tree, {
+        android: {
+          text: 'Delete',
+          className: 'android.widget.Button',
+          packageName: 'com.example',
+        },
+      }),
+    ).toThrow(/Ambiguous Android cache feature/);
   });
 
   it('parses raw physical bounds with scaling', () => {
@@ -173,6 +245,49 @@ describe('Android fast locator', () => {
       },
       metadata: {
         resourceId: 'com.example:id/login',
+        selector: expect.any(Object),
+      },
+    });
+  });
+
+  it('uses row context and reports ambiguity for repeated structured candidates', () => {
+    const tree = parseUiautomatorXml(duplicateRowsXml);
+
+    const bobCandidates = locateAndroidElementCandidates(
+      tree,
+      'Bob delete button',
+      {
+        minScore: 0.45,
+        maxCandidates: 3,
+      },
+    );
+    expect(bobCandidates[0]).toMatchObject({
+      element: {
+        center: [320, 150],
+      },
+      reason: expect.stringContaining('context'),
+      metadata: {
+        rowText: expect.stringContaining('Bob'),
+      },
+    });
+
+    expect(
+      locateAndroidElementByPrompt(tree, 'delete button', {
+        minScore: 0.45,
+      }),
+    ).toBeNull();
+    const ambiguousCandidates = locateAndroidElementCandidates(
+      tree,
+      'delete button',
+      {
+        minScore: 0.45,
+        maxCandidates: 2,
+      },
+    );
+    expect(ambiguousCandidates[0].metadata).toMatchObject({
+      ambiguous: true,
+      ambiguity: {
+        competitorCount: 1,
       },
     });
   });
