@@ -156,6 +156,8 @@ export type AndroidDeviceOpt = {
               /** Remote localabstract socket name when forwarding localabstract. */
               localAbstractName?: string;
             };
+        /** Optional known helper capabilities when the helper does not expose /capabilities yet. */
+        capabilities?: string[];
       };
   /**
    * @deprecated This option has been removed and no longer has any effect.

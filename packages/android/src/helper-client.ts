@@ -1,10 +1,19 @@
 import type { Rect, Size } from '@midscene/core';
 import type { ElementNode } from '@midscene/shared/extractor';
+import type {
+  AndroidNotificationRequest,
+  AndroidNotificationResult,
+  AndroidPermissionRequest,
+  AndroidPermissionResult,
+  AndroidSystemState,
+  AndroidSystemStateRequest,
+} from './system-state';
 
 export const DEFAULT_ANDROID_HELPER_ENDPOINT = 'http://127.0.0.1:17310';
 export const DEFAULT_ANDROID_HELPER_TIMEOUT_MS = 1000;
 export const DEFAULT_ANDROID_HELPER_LOCAL_PORT = 17310;
 export const DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT = 'midscene_helper';
+export const ANDROID_HELPER_PROTOCOL_VERSION = 'phase-f.1';
 
 type FetchResponseLike = {
   ok: boolean;
@@ -42,11 +51,16 @@ export type AndroidHelperSnapshotPart =
   | 'uiTree'
   | 'foreground'
   | 'window'
+  | 'windows'
   | 'keyboard'
   | 'overlays'
   | 'crash'
   | 'anr'
-  | 'guard';
+  | 'guard'
+  | 'system'
+  | 'permissions'
+  | 'notifications'
+  | 'capabilities';
 
 export interface AndroidHelperSnapshotRequest {
   include?: AndroidHelperSnapshotPart[];
@@ -94,6 +108,39 @@ export interface AndroidHelperGuardState {
   raw?: string;
 }
 
+export type AndroidHelperCapability =
+  | 'snapshot.screenshot'
+  | 'snapshot.uiTree'
+  | 'snapshot.foreground'
+  | 'snapshot.window'
+  | 'snapshot.keyboard'
+  | 'snapshot.guard'
+  | 'input.tap'
+  | 'input.swipe'
+  | 'input.text'
+  | 'input.key'
+  | 'app.launch'
+  | 'app.terminate'
+  | 'app.clearData'
+  | 'app.permissions'
+  | 'system.settings'
+  | 'system.properties'
+  | 'system.windows'
+  | 'system.notifications'
+  | 'system.rootShell';
+
+export interface AndroidHelperCapabilityResult {
+  protocolVersion?: string;
+  serverVersion?: string;
+  packageName?: string;
+  capabilities: Array<AndroidHelperCapability | string>;
+  root?: boolean;
+  systemSigned?: boolean;
+  accessibility?: boolean;
+  uptimeMs?: number;
+  raw?: unknown;
+}
+
 export interface AndroidHelperSnapshot {
   timestamp?: number;
   screenshot?: AndroidHelperScreenshot;
@@ -115,6 +162,10 @@ export interface AndroidHelperSnapshot {
     raw?: string;
   };
   overlays?: AndroidHelperOverlayState[];
+  system?: AndroidSystemState;
+  permissions?: AndroidPermissionResult;
+  notifications?: AndroidNotificationResult;
+  capabilities?: AndroidHelperCapabilityResult;
   crash?: AndroidHelperIssueState;
   anr?: AndroidHelperIssueState;
   guard?: AndroidHelperGuardState;
@@ -222,6 +273,10 @@ export class AndroidHelperClient {
     return await this.request('/ping', { method: 'GET' });
   }
 
+  async capabilities(): Promise<AndroidHelperCapabilityResult> {
+    return await this.request('/capabilities', { method: 'GET' });
+  }
+
   async snapshot(
     request: AndroidHelperSnapshotRequest = {},
   ): Promise<AndroidHelperSnapshot> {
@@ -245,6 +300,33 @@ export class AndroidHelperClient {
     return await this.request('/app', {
       method: 'POST',
       body: command,
+    });
+  }
+
+  async system(
+    request: AndroidSystemStateRequest = {},
+  ): Promise<AndroidSystemState> {
+    return await this.request('/system', {
+      method: 'POST',
+      body: request,
+    });
+  }
+
+  async permissions(
+    request: AndroidPermissionRequest,
+  ): Promise<AndroidPermissionResult> {
+    return await this.request('/permissions', {
+      method: 'POST',
+      body: request,
+    });
+  }
+
+  async notifications(
+    request: AndroidNotificationRequest = {},
+  ): Promise<AndroidNotificationResult> {
+    return await this.request('/notifications', {
+      method: 'POST',
+      body: request,
     });
   }
 

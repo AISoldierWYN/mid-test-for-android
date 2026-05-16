@@ -307,4 +307,216 @@ describe('AndroidDevice helper integration', () => {
     });
     expect(device.getRuntimeGuardRecipeCache()).toHaveLength(1);
   });
+
+  it('uses deep helper system endpoint for deterministic state reads', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonResponse({
+        ok: true,
+        data: {
+          source: 'helper',
+          properties: [
+            {
+              key: 'ro.build.version.sdk',
+              value: '35',
+            },
+          ],
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetch);
+    const device = new AndroidDevice('test-device', {
+      helper: { endpoint: 'http://helper.local', timeoutMs: 100 },
+      scrcpyConfig: { enabled: false },
+    });
+
+    const state = await device.getAndroidSystemState({
+      include: ['properties'],
+      properties: ['ro.build.version.sdk'],
+    });
+
+    expect(state).toMatchObject({
+      source: 'helper',
+      properties: [{ key: 'ro.build.version.sdk', value: '35' }],
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      'http://helper.local/system',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          include: ['properties'],
+          properties: ['ro.build.version.sdk'],
+        }),
+      }),
+    );
+  });
+
+  it('falls back to ADB system state APIs without UI navigation', async () => {
+    const device = new AndroidDevice('test-device', {
+      scrcpyConfig: { enabled: false },
+    });
+    const mockAdb = {
+      shell: vi.fn(async (command: string) => {
+        if (command === 'dumpsys window windows') {
+          return 'mCurrentFocus=Window{123 u0 com.example/.MainActivity}';
+        }
+        if (command === "settings get global 'wifi_on'") {
+          return '1\n';
+        }
+        if (command === "getprop 'ro.build.version.sdk'") {
+          return '35\n';
+        }
+        return '';
+      }),
+    };
+    vi.spyOn(device, 'getAdb').mockResolvedValue(mockAdb as any);
+
+    const state = await device.getAndroidSystemState({
+      include: ['foreground', 'settings', 'properties'],
+      settings: [{ namespace: 'global', key: 'wifi_on' }],
+      properties: ['ro.build.version.sdk'],
+    });
+
+    expect(state).toMatchObject({
+      source: 'adb',
+      foreground: {
+        packageName: 'com.example',
+        activity: '.MainActivity',
+      },
+      settings: [{ namespace: 'global', key: 'wifi_on', value: '1' }],
+      properties: [{ key: 'ro.build.version.sdk', value: '35' }],
+    });
+    expect(mockAdb.shell).not.toHaveBeenCalledWith(
+      expect.stringContaining('uiautomator dump'),
+    );
+  });
+
+  it('exposes deterministic system state as an action-space command', async () => {
+    const device = new AndroidDevice('test-device', {
+      scrcpyConfig: { enabled: false },
+    });
+    const mockAdb = {
+      shell: vi.fn(async (command: string) => {
+        if (command === "getprop 'ro.build.version.sdk'") {
+          return '35\n';
+        }
+        return '';
+      }),
+    };
+    vi.spyOn(device, 'getAdb').mockResolvedValue(mockAdb as any);
+    const action = device
+      .actionSpace()
+      .find((item) => item.name === 'AndroidGetSystemState');
+
+    const result = await action?.call(
+      {
+        include: ['properties'],
+        properties: ['ro.build.version.sdk'],
+      } as any,
+      {} as any,
+    );
+
+    expect(JSON.parse(result as string)).toMatchObject({
+      source: 'adb',
+      properties: [{ key: 'ro.build.version.sdk', value: '35' }],
+    });
+    expect(mockAdb.shell).not.toHaveBeenCalledWith(
+      expect.stringContaining('uiautomator dump'),
+    );
+  });
+
+  it('exposes deterministic permission mutation as an action-space command', async () => {
+    const device = new AndroidDevice('test-device', {
+      scrcpyConfig: { enabled: false },
+    });
+    const mockAdb = {
+      shell: vi.fn().mockResolvedValue(''),
+    };
+    vi.spyOn(device, 'getAdb').mockResolvedValue(mockAdb as any);
+    const action = device
+      .actionSpace()
+      .find((item) => item.name === 'AndroidSetPermission');
+
+    const result = await action?.call(
+      {
+        packageName: 'com.example',
+        permission: 'android.permission.CAMERA',
+        mode: 'grant',
+      } as any,
+      {} as any,
+    );
+
+    expect(JSON.parse(result as string)).toMatchObject({
+      source: 'adb',
+      packageName: 'com.example',
+      permissions: [{ permission: 'android.permission.CAMERA', granted: true }],
+    });
+    expect(mockAdb.shell).toHaveBeenCalledWith(
+      "pm grant 'com.example' 'android.permission.CAMERA'",
+    );
+  });
+
+  it('sets permissions through helper and falls back to package manager commands', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonResponse({
+        ok: true,
+        data: {
+          handled: true,
+          packageName: 'com.example',
+          permissions: [
+            { permission: 'android.permission.CAMERA', granted: true },
+          ],
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetch);
+    const helperDevice = new AndroidDevice('test-device', {
+      helper: { endpoint: 'http://helper.local', timeoutMs: 100 },
+      scrcpyConfig: { enabled: false },
+    });
+
+    await expect(
+      helperDevice.setAndroidPermission({
+        packageName: 'com.example',
+        permission: 'android.permission.CAMERA',
+        mode: 'grant',
+      }),
+    ).resolves.toMatchObject({ source: 'helper', handled: true });
+    expect(fetch).toHaveBeenCalledWith(
+      'http://helper.local/permissions',
+      expect.objectContaining({ method: 'POST' }),
+    );
+
+    const adbDevice = new AndroidDevice('test-device', {
+      scrcpyConfig: { enabled: false },
+    });
+    const mockAdb = {
+      shell: vi.fn().mockResolvedValue(''),
+    };
+    vi.spyOn(adbDevice, 'getAdb').mockResolvedValue(mockAdb as any);
+
+    await adbDevice.setAndroidPermission({
+      packageName: 'com.example',
+      permission: 'android.permission.CAMERA',
+      mode: 'grant',
+    });
+
+    expect(mockAdb.shell).toHaveBeenCalledWith(
+      "pm grant 'com.example' 'android.permission.CAMERA'",
+    );
+  });
+
+  it('uses configured helper capabilities when endpoint discovery is unavailable', async () => {
+    const device = new AndroidDevice('test-device', {
+      helper: {
+        enabled: true,
+        capabilities: ['system.settings', 'system.properties'],
+      },
+      scrcpyConfig: { enabled: false },
+    });
+
+    await expect(device.getAndroidHelperCapabilities()).resolves.toMatchObject({
+      protocolVersion: 'configured',
+      capabilities: ['system.settings', 'system.properties'],
+    });
+  });
 });

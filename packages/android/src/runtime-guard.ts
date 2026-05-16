@@ -97,6 +97,8 @@ const RECOVERY_ACTIONS = new Set([
   'RunAdbShell',
   'Launch',
   'Terminate',
+  'AndroidGetSystemState',
+  'AndroidSetPermission',
   'KeyboardPress',
   'AndroidBackButton',
   'AndroidHomeButton',

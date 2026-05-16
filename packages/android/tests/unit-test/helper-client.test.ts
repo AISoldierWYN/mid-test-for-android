@@ -58,6 +58,106 @@ describe('AndroidHelperClient', () => {
     });
   });
 
+  it('calls deep helper endpoints for capabilities and system APIs', async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          data: {
+            capabilities: ['system.settings', 'app.permissions'],
+            systemSigned: true,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          data: {
+            source: 'helper',
+            settings: [{ namespace: 'global', key: 'wifi_on', value: '1' }],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          data: {
+            handled: true,
+            packageName: 'com.example',
+            permissions: [
+              { permission: 'android.permission.CAMERA', granted: true },
+            ],
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          data: {
+            notifications: [{ packageName: 'com.example', title: 'Ready' }],
+          },
+        }),
+      );
+    const client = new AndroidHelperClient({
+      endpoint: 'http://helper.local',
+      fetch,
+    });
+
+    await expect(client.capabilities()).resolves.toMatchObject({
+      capabilities: ['system.settings', 'app.permissions'],
+      systemSigned: true,
+    });
+    await expect(
+      client.system({
+        include: ['settings'],
+        settings: [{ namespace: 'global', key: 'wifi_on' }],
+      }),
+    ).resolves.toMatchObject({
+      settings: [{ namespace: 'global', key: 'wifi_on', value: '1' }],
+    });
+    await expect(
+      client.permissions({
+        action: 'grant',
+        packageName: 'com.example',
+        permission: 'android.permission.CAMERA',
+        mode: 'grant',
+      }),
+    ).resolves.toMatchObject({ handled: true, packageName: 'com.example' });
+    await expect(
+      client.notifications({ packageName: 'com.example' }),
+    ).resolves.toMatchObject({
+      notifications: [{ packageName: 'com.example', title: 'Ready' }],
+    });
+
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      'http://helper.local/capabilities',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      'http://helper.local/system',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          include: ['settings'],
+          settings: [{ namespace: 'global', key: 'wifi_on' }],
+        }),
+      }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      'http://helper.local/permissions',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      4,
+      'http://helper.local/notifications',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
   it('throws clear errors for helper failures', async () => {
     const fetch = vi
       .fn()

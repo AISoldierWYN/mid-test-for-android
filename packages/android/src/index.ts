@@ -38,6 +38,16 @@ export {
   scrollRecipeAnchorSignature,
 } from './scroll-fast-path';
 export {
+  collectAndroidSystemStateWithAdb,
+  mutateAndroidPermissionWithAdb,
+  normalizeAndroidSystemStateRequest,
+  parseAndroidNotifications,
+  parseAndroidPermissions,
+  parseAndroidWindowSnapshot,
+  queryAndroidNotificationsWithAdb,
+  queryAndroidPermissionsWithAdb,
+} from './system-state';
+export {
   AndroidRecoveryRecipeCache,
   AndroidRuntimeGuard,
   AndroidRuntimeGuardError,
@@ -47,6 +57,7 @@ export {
   normalizeGuardOptions,
 } from './runtime-guard';
 export {
+  ANDROID_HELPER_PROTOCOL_VERSION,
   AndroidHelperClient,
   DEFAULT_ANDROID_HELPER_ENDPOINT,
   DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT,
@@ -87,6 +98,8 @@ export type {
   AndroidRuntimeGuardStatus,
 } from './runtime-guard';
 export type {
+  AndroidHelperCapability,
+  AndroidHelperCapabilityResult,
   AndroidHelperAppCommand,
   AndroidHelperAppResult,
   AndroidHelperClientOptions,
@@ -108,3 +121,24 @@ export type {
   AndroidHelperSnapshotPart,
   AndroidHelperSnapshotRequest,
 } from './helper-client';
+export type {
+  AndroidAppOpEntry,
+  AndroidNotificationRequest,
+  AndroidNotificationResult,
+  AndroidNotificationSnapshot,
+  AndroidPermissionEntry,
+  AndroidPermissionMode,
+  AndroidPermissionMutation,
+  AndroidPermissionQuery,
+  AndroidPermissionRequest,
+  AndroidPermissionResult,
+  AndroidPropertyValue,
+  AndroidSettingsNamespace,
+  AndroidSettingsQuery,
+  AndroidSettingsValue,
+  AndroidSystemState,
+  AndroidSystemStatePart,
+  AndroidSystemStateRequest,
+  AndroidSystemStateSource,
+  AndroidWindowSnapshot,
+} from './system-state';

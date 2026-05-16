@@ -72,6 +72,7 @@ import {
 } from './fast-locator';
 import {
   type AndroidHelperAppCommand,
+  type AndroidHelperCapabilityResult,
   AndroidHelperClient,
   type AndroidHelperInputAction,
   type AndroidHelperSnapshot,
@@ -96,6 +97,19 @@ import {
   buildAndroidScrollRecipe,
   scrollRecipeAnchorSignature,
 } from './scroll-fast-path';
+import {
+  type AndroidNotificationRequest,
+  type AndroidNotificationResult,
+  type AndroidPermissionMutation,
+  type AndroidPermissionQuery,
+  type AndroidPermissionResult,
+  type AndroidSystemState,
+  type AndroidSystemStateRequest,
+  collectAndroidSystemStateWithAdb,
+  mutateAndroidPermissionWithAdb,
+  queryAndroidNotificationsWithAdb,
+  queryAndroidPermissionsWithAdb,
+} from './system-state';
 import {
   buildAndroidCacheFeatureForPoint,
   getAndroidUiTreeScale,
@@ -623,8 +637,11 @@ export class AndroidDevice implements AbstractInterface {
   }
 
   private categoryForAction(actionName: string): AndroidTimingCategory {
-    if (actionName === 'RunAdbShell') {
+    if (actionName === 'RunAdbShell' || actionName === 'AndroidSetPermission') {
       return 'adbShell';
+    }
+    if (actionName === 'AndroidGetSystemState') {
+      return 'state';
     }
     if (actionName === 'Launch' || actionName === 'Terminate') {
       return 'app';
@@ -897,6 +914,107 @@ ${Object.keys(size)
       (await this.tryHelperRequest('snapshot', async (client) =>
         client.snapshot({ include }),
       )) ?? null
+    );
+  }
+
+  public async getAndroidHelperCapabilities(): Promise<AndroidHelperCapabilityResult | null> {
+    const configuredCapabilities = this.getHelperOptions()?.capabilities;
+    if (configuredCapabilities?.length) {
+      return {
+        protocolVersion: 'configured',
+        capabilities: configuredCapabilities,
+      };
+    }
+
+    const capabilities = await this.tryHelperRequest(
+      'capabilities',
+      async (client) => client.capabilities(),
+    );
+    if (capabilities) {
+      return capabilities;
+    }
+    return null;
+  }
+
+  public async getAndroidSystemState(
+    request: AndroidSystemStateRequest = {},
+  ): Promise<AndroidSystemState> {
+    const helperState = await this.tryHelperRequest(
+      'systemState',
+      async (client) => client.system(request),
+    );
+    if (helperState) {
+      return {
+        ...helperState,
+        source: helperState.source ?? 'helper',
+      };
+    }
+
+    return await collectAndroidSystemStateWithAdb(
+      (command) => this.runAdbShell(command),
+      request,
+    );
+  }
+
+  public async getAndroidPermissions(
+    query: AndroidPermissionQuery,
+  ): Promise<AndroidPermissionResult> {
+    const helperResult = await this.tryHelperRequest(
+      'permissions',
+      async (client) => client.permissions({ action: 'get', ...query }),
+    );
+    if (helperResult?.handled !== false) {
+      return helperResult
+        ? { ...helperResult, source: helperResult.source ?? 'helper' }
+        : await queryAndroidPermissionsWithAdb(
+            (command) => this.runAdbShell(command),
+            query,
+          );
+    }
+
+    return await queryAndroidPermissionsWithAdb(
+      (command) => this.runAdbShell(command),
+      query,
+    );
+  }
+
+  public async setAndroidPermission(
+    mutation: AndroidPermissionMutation,
+  ): Promise<AndroidPermissionResult> {
+    const helperResult = await this.tryHelperRequest(
+      'permissions',
+      async (client) =>
+        client.permissions({ action: mutation.mode, ...mutation }),
+    );
+    if (helperResult?.handled === true) {
+      return { ...helperResult, source: helperResult.source ?? 'helper' };
+    }
+
+    return await mutateAndroidPermissionWithAdb(
+      (command) => this.runAdbShell(command),
+      mutation,
+    );
+  }
+
+  public async getAndroidNotifications(
+    request: AndroidNotificationRequest = {},
+  ): Promise<AndroidNotificationResult> {
+    const helperResult = await this.tryHelperRequest(
+      'notifications',
+      async (client) => client.notifications(request),
+    );
+    if (helperResult?.handled !== false) {
+      return helperResult
+        ? { ...helperResult, source: helperResult.source ?? 'helper' }
+        : await queryAndroidNotificationsWithAdb(
+            (command) => this.runAdbShell(command),
+            request,
+          );
+    }
+
+    return await queryAndroidNotificationsWithAdb(
+      (command) => this.runAdbShell(command),
+      request,
     );
   }
 
@@ -1229,6 +1347,11 @@ ${Object.keys(size)
       client.input(actions),
     );
     return result?.handled === true;
+  }
+
+  private async runAdbShell(command: string): Promise<string> {
+    const adb = await this.getAdb();
+    return await adb.shell(command);
   }
 
   async execYadb(keyboardContent: string): Promise<void> {
@@ -3105,13 +3228,82 @@ const terminateParamSchema = z.object({
     ),
 });
 
+const androidSystemStateParamSchema = z.object({
+  include: z
+    .array(
+      z.enum([
+        'foreground',
+        'settings',
+        'properties',
+        'windows',
+        'notifications',
+      ]),
+    )
+    .optional()
+    .describe('System state sections to collect without UI navigation'),
+  settings: z
+    .array(
+      z.object({
+        namespace: z.enum(['system', 'secure', 'global']),
+        key: z.string(),
+      }),
+    )
+    .optional()
+    .describe('Android settings provider keys to read'),
+  properties: z
+    .array(z.string())
+    .optional()
+    .describe('Android system properties to read via getprop'),
+  notificationPackage: z
+    .string()
+    .optional()
+    .describe('Optional package filter for notification snapshots'),
+  notificationLimit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('Maximum notifications to return'),
+});
+
+const androidSetPermissionParamSchema = z.object({
+  packageName: z.string().describe('Target Android package name'),
+  permission: z
+    .string()
+    .describe('Android runtime permission, e.g. android.permission.CAMERA'),
+  mode: z
+    .enum(['grant', 'revoke'])
+    .default('grant')
+    .describe('Whether to grant or revoke the permission'),
+  appOp: z
+    .string()
+    .optional()
+    .describe('Optional appops operation to set with the permission'),
+  appOpMode: z
+    .string()
+    .optional()
+    .describe('Optional appops mode, defaults to allow/ignore by mode'),
+});
+
 type RunAdbShellParam = z.infer<typeof runAdbShellParamSchema>;
 type LaunchParam = z.infer<typeof launchParamSchema>;
 type TerminateParam = z.infer<typeof terminateParamSchema>;
+type AndroidGetSystemStateParam = z.infer<typeof androidSystemStateParamSchema>;
+type AndroidSetPermissionParam = z.infer<
+  typeof androidSetPermissionParamSchema
+>;
 
 export type DeviceActionRunAdbShell = DeviceAction<RunAdbShellParam, string>;
 export type DeviceActionLaunch = DeviceAction<LaunchParam, void>;
 export type DeviceActionTerminate = DeviceAction<TerminateParam, void>;
+export type DeviceActionAndroidGetSystemState = DeviceAction<
+  AndroidGetSystemStateParam,
+  string
+>;
+export type DeviceActionAndroidSetPermission = DeviceAction<
+  AndroidSetPermissionParam,
+  string
+>;
 
 const createPlatformActions = (
   device: AndroidDevice,
@@ -3119,6 +3311,8 @@ const createPlatformActions = (
   RunAdbShell: DeviceActionRunAdbShell;
   Launch: DeviceActionLaunch;
   Terminate: DeviceActionTerminate;
+  AndroidGetSystemState: DeviceActionAndroidGetSystemState;
+  AndroidSetPermission: DeviceActionAndroidSetPermission;
   AndroidBackButton: DeviceActionAndroidBackButton;
   AndroidHomeButton: DeviceActionAndroidHomeButton;
   AndroidRecentAppsButton: DeviceActionAndroidRecentAppsButton;
@@ -3171,6 +3365,46 @@ const createPlatformActions = (
           throw new Error('Terminate requires a non-empty uri parameter');
         }
         await device.terminate(param.uri);
+      },
+    }),
+    AndroidGetSystemState: defineAction<
+      typeof androidSystemStateParamSchema,
+      AndroidGetSystemStateParam,
+      string
+    >({
+      name: 'AndroidGetSystemState',
+      description:
+        'Read Android system state through helper/root/ADB without navigating the UI. Use this for settings provider, system properties, foreground window, and notification checks.',
+      interfaceAlias: 'androidGetSystemState',
+      paramSchema: androidSystemStateParamSchema,
+      sample: {
+        include: ['foreground', 'settings', 'properties'],
+        settings: [{ namespace: 'global', key: 'wifi_on' }],
+        properties: ['ro.build.version.sdk'],
+      },
+      call: async (param) => {
+        const state = await device.getAndroidSystemState(param);
+        return JSON.stringify(state, null, 2);
+      },
+    }),
+    AndroidSetPermission: defineAction<
+      typeof androidSetPermissionParamSchema,
+      AndroidSetPermissionParam,
+      string
+    >({
+      name: 'AndroidSetPermission',
+      description:
+        'Grant or revoke an Android runtime permission through helper/root/ADB without opening permission UI.',
+      interfaceAlias: 'androidSetPermission',
+      paramSchema: androidSetPermissionParamSchema,
+      sample: {
+        packageName: 'com.example.app',
+        permission: 'android.permission.CAMERA',
+        mode: 'grant',
+      },
+      call: async (param) => {
+        const result = await device.setAndroidPermission(param);
+        return JSON.stringify(result, null, 2);
       },
     }),
     AndroidBackButton: defineAction({

@@ -895,6 +895,8 @@ wrong-action rate after cache hit
 
 ### Phase F: Helper APK Deep Integration
 
+状态：已完成第一版 Node 侧深度集成。已定义 helper APK `phase-f.1` HTTP 协议面，覆盖 capabilities、system、permissions、notifications，并把 AndroidDevice 接入 helper 优先、ADB/root/system provider fallback 的确定性路径；新增 `AndroidGetSystemState` 和 `AndroidSetPermission` action，用于读取 settings/getprop/window/notification 状态和授权/撤权，避免把系统状态测试绕回 UI 路线。仓库当前仍未内置 Gradle APK 工程，后续真正的系统签名 APK 可按该协议实现 server。
+
 交付：
 
 - 实现 helper APK server。
