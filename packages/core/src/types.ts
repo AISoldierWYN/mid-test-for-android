@@ -174,6 +174,7 @@ export type CandidateAdjudication = boolean | CandidateAdjudicationConfig;
 export type RuntimeRecoveryIssueKind =
   | 'permission-dialog'
   | 'system-dialog'
+  | 'popup'
   | 'overlay'
   | 'ad'
   | 'login-required'

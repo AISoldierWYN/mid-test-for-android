@@ -879,6 +879,8 @@ wrong-action rate after cache hit
 
 ### Phase E: Runtime Guard Layer
 
+状态：已完成第一版实现。Android actionSpace 已接入 runtime guard，支持 helper/UiTree 识别 permission/system/popup/keyboard 状态；crash/ANR 会在操作前阻断执行；permission/popup/keyboard 可执行确定性 recovery，并缓存验证成功的 recovery recipe。默认仅在配置 helper 时自动启用，避免无 helper 设备每步产生额外 ADB 成本；也可以通过 `AndroidDeviceOpt.runtimeGuard` 显式启用或关闭。
+
 交付：
 
 - 每个操作前运行 guard。

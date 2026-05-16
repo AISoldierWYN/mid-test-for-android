@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AndroidDevice } from '../../src/device';
+import { parseUiautomatorXml } from '../../src/ui-tree';
 
 const sampleXml = String.raw`
 <hierarchy rotation="0">
   <node index="0" text="Sign in" resource-id="com.example:id/login" class="android.widget.Button" package="com.example" content-desc="Login button" clickable="true" enabled="true" bounds="[20,40][180,100]" />
+</hierarchy>
+`;
+
+const permissionDialogXml = String.raw`
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="com.android.permissioncontroller:id/grant_dialog" class="android.app.Dialog" package="com.android.permissioncontroller" content-desc="" clickable="false" enabled="true" bounds="[0,0][400,600]">
+    <node index="0" text="Allow" resource-id="com.android.permissioncontroller:id/permission_allow_button" class="android.widget.Button" package="com.android.permissioncontroller" content-desc="" clickable="true" enabled="true" bounds="[240,500][380,560]" />
+  </node>
 </hierarchy>
 `;
 
@@ -248,5 +257,54 @@ describe('AndroidDevice helper integration', () => {
         }),
       }),
     );
+  });
+
+  it('runs runtime guard before action-space actions', async () => {
+    const device = new AndroidDevice('test-device', {
+      runtimeGuard: { settleMs: 0 },
+      scrcpyConfig: { enabled: false },
+    });
+    const permissionState = {
+      foreground: { packageName: 'com.example', activity: '.MainActivity' },
+      issues: [
+        {
+          kind: 'permission-dialog',
+          severity: 'warning',
+          message: 'Permission dialog is visible',
+        },
+      ],
+    } as const;
+    const cleanState = {
+      foreground: { packageName: 'com.example', activity: '.MainActivity' },
+      issues: [],
+    } as const;
+    vi.spyOn(device, 'recoveryState')
+      .mockResolvedValueOnce(permissionState)
+      .mockResolvedValueOnce(cleanState);
+    vi.spyOn(device, 'getElementsNodeTree').mockResolvedValue(
+      parseUiautomatorXml(permissionDialogXml),
+    );
+    const click = vi.spyOn(device, 'mouseClick').mockResolvedValue(undefined);
+    const tapAction = device
+      .actionSpace()
+      .find((action) => action.name === 'Tap');
+
+    await tapAction?.call(
+      {
+        locate: {
+          rect: { left: 40, top: 50, width: 20, height: 20 },
+          center: [50, 60],
+          description: 'target button',
+        },
+      } as any,
+      {} as any,
+    );
+
+    expect(click).toHaveBeenNthCalledWith(1, 310, 530);
+    expect(click).toHaveBeenNthCalledWith(2, 50, 60);
+    expect(device.getRuntimeGuardLastResult()).toMatchObject({
+      status: 'recovered',
+    });
+    expect(device.getRuntimeGuardRecipeCache()).toHaveLength(1);
   });
 });

@@ -88,6 +88,44 @@ export type AndroidDeviceOpt = {
         settleMs?: number;
       };
   /**
+   * Phase E Android runtime guard.
+   *
+   * When enabled, Android runs a deterministic runtime guard before regular UI
+   * actions. The guard blocks crash/ANR states and can recover common
+   * permission/system/popup/keyboard interruptions before the cached UI path
+   * continues. By default it is enabled only when the helper integration is
+   * configured, so devices without a fast helper do not pay an ADB guard cost
+   * before every action unless explicitly requested.
+   */
+  runtimeGuard?:
+    | boolean
+    | {
+        /** Enable runtime guard. Defaults to true when helper is configured. */
+        enabled?: boolean;
+        /** Recover visible soft keyboard before non-input actions. Default: true. */
+        recoverKeyboard?: boolean;
+        /** Recover Android permission dialogs by tapping allow-style buttons. Default: true. */
+        recoverPermissionDialogs?: boolean;
+        /** Recover system dialogs. Default: true. */
+        recoverSystemDialogs?: boolean;
+        /** Recover popups, overlays, and ad-like interruptions. Default: true. */
+        recoverPopups?: boolean;
+        /** Throw immediately for crash/ANR instead of continuing UI actions. Default: true. */
+        failOnCritical?: boolean;
+        /** Throw when a recoverable issue could not be cleared. Default: false. */
+        failOnUnresolved?: boolean;
+        /** Inspect the UI tree for dialog buttons when recovery state is not enough. Default: true. */
+        inspectUiTree?: boolean;
+        /** Reuse successful deterministic recovery recipes. Default: true. */
+        cacheRecipes?: boolean;
+        /** Maximum recovery attempts before continuing or failing. Default: 2. */
+        maxRecoveryAttempts?: number;
+        /** Delay after each recovery action before verifying state. Default: 250. */
+        settleMs?: number;
+        /** Action names that should skip runtime guard. */
+        skipActions?: string[];
+      };
+  /**
    * Phase 3 Android system helper integration.
    *
    * Disabled by default. When enabled, AndroidDevice can ask a privileged helper

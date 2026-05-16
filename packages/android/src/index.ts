@@ -38,6 +38,15 @@ export {
   scrollRecipeAnchorSignature,
 } from './scroll-fast-path';
 export {
+  AndroidRecoveryRecipeCache,
+  AndroidRuntimeGuard,
+  AndroidRuntimeGuardError,
+  detectAndroidRuntimeIssuesFromTree,
+  issueSignature,
+  normalizeAndroidRuntimeIssues,
+  normalizeGuardOptions,
+} from './runtime-guard';
+export {
   AndroidHelperClient,
   DEFAULT_ANDROID_HELPER_ENDPOINT,
   DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT,
@@ -69,6 +78,14 @@ export type {
   AndroidScrollRecipeCache,
   AndroidScrollableContainer,
 } from './scroll-fast-path';
+export type {
+  AndroidRecoveryAction,
+  AndroidRecoveryRecipe,
+  AndroidRuntimeGuardOption,
+  AndroidRuntimeGuardOptions,
+  AndroidRuntimeGuardResult,
+  AndroidRuntimeGuardStatus,
+} from './runtime-guard';
 export type {
   AndroidHelperAppCommand,
   AndroidHelperAppResult,

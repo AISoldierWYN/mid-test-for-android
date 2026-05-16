@@ -81,6 +81,12 @@ import {
   DEFAULT_ANDROID_HELPER_LOCAL_PORT,
 } from './helper-client';
 import {
+  type AndroidRecoveryRecipe,
+  AndroidRuntimeGuard,
+  type AndroidRuntimeGuardOption,
+  type AndroidRuntimeGuardResult,
+} from './runtime-guard';
+import {
   type DevicePhysicalInfo,
   ScrcpyDeviceAdapter,
 } from './scrcpy-device-adapter';
@@ -257,6 +263,8 @@ export class AndroidDevice implements AbstractInterface {
   private helperForwardPromise: Promise<void> | null = null;
   private helperUnavailable = false;
   private helperUnavailableLogged = false;
+  private runtimeGuard: AndroidRuntimeGuard | null = null;
+  private lastRuntimeGuardResult: AndroidRuntimeGuardResult | null = null;
   private static readonly TAKE_SCREENSHOT_FAIL_THRESHOLD = 3;
   interfaceType: InterfaceType = 'android';
   uri: string | undefined;
@@ -549,7 +557,26 @@ export class AndroidDevice implements AbstractInterface {
       ...defaultActions,
       ...platformSpecificActions,
       ...customActions,
-    ].map((action) => this.wrapActionWithDiagnostics(action));
+    ].map((action) =>
+      this.wrapActionWithDiagnostics(this.wrapActionWithRuntimeGuard(action)),
+    );
+  }
+
+  private wrapActionWithRuntimeGuard<TParam, TReturn>(
+    action: DeviceAction<TParam, TReturn>,
+  ): DeviceAction<TParam, TReturn> {
+    return {
+      ...action,
+      call: async (param, context) => {
+        this.lastRuntimeGuardResult = await this.getRuntimeGuard()
+          .runBeforeAction(action.name, this.getRuntimeGuardOption())
+          .catch((error) => {
+            this.lastRuntimeGuardResult = error?.result ?? null;
+            throw error;
+          });
+        return await action.call(param, context);
+      },
+    };
   }
 
   private wrapActionWithDiagnostics<TParam, TReturn>(
@@ -608,6 +635,7 @@ export class AndroidDevice implements AbstractInterface {
         'DoubleClick',
         'Input',
         'Scroll',
+        'ScrollUntilVisible',
         'DragAndDrop',
         'Swipe',
         'KeyboardPress',
@@ -822,6 +850,38 @@ ${Object.keys(size)
 
   public resetDiagnostics(): void {
     this.diagnostics.reset();
+  }
+
+  public getRuntimeGuardLastResult(): AndroidRuntimeGuardResult | null {
+    return this.lastRuntimeGuardResult;
+  }
+
+  public getRuntimeGuardRecipeCache(): AndroidRecoveryRecipe[] {
+    return this.getRuntimeGuard().getRecipeCacheSnapshot();
+  }
+
+  private getRuntimeGuard(): AndroidRuntimeGuard {
+    if (!this.runtimeGuard) {
+      this.runtimeGuard = new AndroidRuntimeGuard({
+        recoveryState: () => this.recoveryState(),
+        getUiTree: () => this.getElementsNodeTree(),
+        tap: (x, y) => this.mouseClick(x, y),
+        pressBack: () => this.back(),
+        hideKeyboard: () => this.hideKeyboard(),
+        sleep: async (ms) => {
+          await sleep(ms);
+        },
+      });
+    }
+    return this.runtimeGuard;
+  }
+
+  private getRuntimeGuardOption(): AndroidRuntimeGuardOption {
+    const configured = this.options?.runtimeGuard;
+    if (configured !== undefined) {
+      return configured;
+    }
+    return { enabled: Boolean(this.getHelperOptions()) };
   }
 
   public async getAndroidHelperSnapshot(
