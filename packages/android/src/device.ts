@@ -85,8 +85,15 @@ import {
   ScrcpyDeviceAdapter,
 } from './scrcpy-device-adapter';
 import {
+  type AndroidScrollDirection,
+  type AndroidScrollRecipe,
+  buildAndroidScrollRecipe,
+  scrollRecipeAnchorSignature,
+} from './scroll-fast-path';
+import {
   buildAndroidCacheFeatureForPoint,
   getAndroidUiTreeScale,
+  matchAndroidCacheFeature,
   parseUiautomatorXml,
   rectMatchesAndroidCacheFeature,
 } from './ui-tree';
@@ -132,6 +139,20 @@ function promptToText(prompt: PlanningLocateParam['prompt']): string {
     return prompt;
   }
   return prompt?.prompt ?? '';
+}
+
+function locateResultFromRect(
+  rect: Rect,
+  description: string,
+): LocateResultElement {
+  return {
+    rect,
+    center: [
+      Math.round(rect.left + rect.width / 2),
+      Math.round(rect.top + rect.height / 2),
+    ],
+    description,
+  };
 }
 
 function buildRuntimeRecoveryIssues(
@@ -352,6 +373,56 @@ export class AndroidDevice implements AbstractInterface {
             )}`,
           );
         }
+      }),
+      defineAction<
+        z.ZodObject<{
+          target: z.ZodString;
+          direction: z.ZodOptional<z.ZodEnum<['up', 'down', 'left', 'right']>>;
+          maxAttempts: z.ZodOptional<z.ZodNumber>;
+        }>,
+        {
+          target: string;
+          direction?: AndroidScrollDirection;
+          maxAttempts?: number;
+        }
+      >({
+        name: 'ScrollUntilVisible',
+        description:
+          'Deterministically scroll a list or scrollable container until the target element is visible, then stop. Prefer this for long lists and settings pages when the user asks to scroll to or find an item.',
+        paramSchema: z.object({
+          target: z.string().describe('The target element to bring into view'),
+          direction: z
+            .enum(['up', 'down', 'left', 'right'])
+            .optional()
+            .describe(
+              'The scroll direction, defaults to down for vertical lists',
+            ),
+          maxAttempts: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe('Maximum scroll attempts before falling back'),
+        }),
+        sample: {
+          target: 'Advanced settings',
+          direction: 'down',
+          maxAttempts: 6,
+        },
+        call: async (param) => {
+          const result = await this.scrollUntilVisible(
+            { prompt: param.target },
+            {
+              direction: param.direction,
+              maxAttempts: param.maxAttempts,
+            },
+          );
+          if (!result) {
+            throw new Error(
+              `Target is not visible after scrolling: ${param.target}`,
+            );
+          }
+        },
       }),
       defineActionDragAndDrop(async (param) => {
         const from = param.from;
@@ -1231,6 +1302,125 @@ ${Object.keys(size)
         });
       },
     );
+  }
+
+  async scrollUntilVisible(
+    param: PlanningLocateParam,
+    options?: {
+      cacheEntry?: ElementCacheFeature;
+      direction?: AndroidScrollDirection;
+      maxAttempts?: number;
+      uiContext?: unknown;
+      modelConfig?: unknown;
+    },
+  ): Promise<LocateResultElement | null> {
+    const option = this.options?.scrollFastPath;
+    const enabled =
+      typeof option === 'object' ? option.enabled !== false : option !== false;
+    if (!enabled) {
+      return null;
+    }
+
+    const maxAttempts =
+      options?.maxAttempts ??
+      (typeof option === 'object' ? option.maxAttempts : undefined) ??
+      6;
+    const settleMs =
+      typeof option === 'object' ? (option.settleMs ?? 250) : 250;
+    const promptText = promptToText(param.prompt);
+    const seenAnchors = new Set<string>();
+
+    return this.diagnostics.time(
+      'uiTree',
+      'scrollUntilVisible',
+      {
+        prompt: promptText,
+        direction: options?.direction,
+        maxAttempts,
+      },
+      async () => {
+        for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+          const tree = await this.getElementsNodeTree();
+          const visibleElement = this.matchVisibleElementForScroll(
+            tree,
+            param,
+            options?.cacheEntry,
+          );
+          if (visibleElement) {
+            return visibleElement;
+          }
+
+          if (attempt >= maxAttempts) {
+            return null;
+          }
+
+          const recipe = buildAndroidScrollRecipe(tree, {
+            cacheEntry: options?.cacheEntry,
+            direction: options?.direction,
+            maxAttempts,
+            targetText: promptText,
+          });
+          if (!recipe) {
+            return null;
+          }
+
+          const anchorSignature = scrollRecipeAnchorSignature(recipe);
+          if (seenAnchors.has(anchorSignature)) {
+            debugDevice(
+              'scrollUntilVisible stopped because visible anchors did not change: %s',
+              anchorSignature,
+            );
+            return null;
+          }
+          seenAnchors.add(anchorSignature);
+
+          await this.performAndroidScrollRecipe(recipe);
+          if (settleMs > 0) {
+            await sleep(settleMs);
+          }
+        }
+        return null;
+      },
+    );
+  }
+
+  private matchVisibleElementForScroll(
+    tree: ElementNode,
+    param: PlanningLocateParam,
+    cacheEntry?: ElementCacheFeature,
+  ): LocateResultElement | null {
+    if (cacheEntry) {
+      try {
+        const match = matchAndroidCacheFeature(tree, cacheEntry, {
+          minConfidence: 0.55,
+        });
+        return locateResultFromRect(match.rect, promptToText(param.prompt));
+      } catch (error) {
+        debugDevice('scroll cache match failed: %s', error);
+      }
+    }
+
+    return locateAndroidElementByPrompt(tree, param.prompt, {
+      minScore: 0.72,
+    });
+  }
+
+  private async performAndroidScrollRecipe(
+    recipe: AndroidScrollRecipe,
+  ): Promise<void> {
+    const startPoint = {
+      left: recipe.container.center[0],
+      top: recipe.container.center[1],
+    };
+    if (recipe.direction === 'up') {
+      await this.scrollUp(recipe.distance, startPoint);
+    } else if (recipe.direction === 'down') {
+      await this.scrollDown(recipe.distance, startPoint);
+    } else if (recipe.direction === 'left') {
+      await this.scrollLeft(recipe.distance, startPoint);
+    } else {
+      await this.scrollRight(recipe.distance, startPoint);
+    }
   }
 
   async recoveryState(): Promise<RuntimeRecoveryState> {

@@ -71,6 +71,23 @@ export type AndroidDeviceOpt = {
         ambiguityMargin?: number;
       };
   /**
+   * Phase 4 Android scroll/list fast path.
+   *
+   * Enabled by default. When a cached selector is not currently visible,
+   * Android can use cached scroll container identity and current UI tree
+   * anchors to scroll deterministically before falling back to visual locate.
+   */
+  scrollFastPath?:
+    | boolean
+    | {
+        /** Enable scroll/list fast path. Default: true. */
+        enabled?: boolean;
+        /** Maximum scroll attempts for scrollUntilVisible. Default: 6. */
+        maxAttempts?: number;
+        /** Delay after each scroll gesture before reading the UI tree again. Default: 250. */
+        settleMs?: number;
+      };
+  /**
    * Phase 3 Android system helper integration.
    *
    * Disabled by default. When enabled, AndroidDevice can ask a privileged helper

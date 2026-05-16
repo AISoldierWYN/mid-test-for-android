@@ -30,6 +30,14 @@ export {
   visibleContextText,
 } from './scoped-selector';
 export {
+  buildAndroidScrollRecipe,
+  buildAndroidScrollRecipeCache,
+  detectAndroidScrollableContainers,
+  findNearestAndroidScrollableContainer,
+  getAndroidScrollRecipeCache,
+  scrollRecipeAnchorSignature,
+} from './scroll-fast-path';
+export {
   AndroidHelperClient,
   DEFAULT_ANDROID_HELPER_ENDPOINT,
   DEFAULT_ANDROID_HELPER_LOCAL_ABSTRACT,
@@ -55,6 +63,12 @@ export type {
   AndroidScopedNodeContext,
   AndroidScopedSelector,
 } from './scoped-selector';
+export type {
+  AndroidScrollDirection,
+  AndroidScrollRecipe,
+  AndroidScrollRecipeCache,
+  AndroidScrollableContainer,
+} from './scroll-fast-path';
 export type {
   AndroidHelperAppCommand,
   AndroidHelperAppResult,

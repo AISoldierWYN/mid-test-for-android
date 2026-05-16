@@ -52,6 +52,22 @@ export abstract class AbstractInterface {
   ): Promise<LocateResultElement | null | undefined>;
 
   /**
+   * Optional deterministic scroll executor. Runtimes can use structured state
+   * and cached scroll recipes to bring a target into view before falling back
+   * to visual locate.
+   */
+  abstract scrollUntilVisible?(
+    param: PlanningLocateParam,
+    options?: {
+      uiContext?: UIContext;
+      modelConfig?: IModelConfig;
+      cacheEntry?: ElementCacheFeature;
+      direction?: 'up' | 'down' | 'left' | 'right';
+      maxAttempts?: number;
+    },
+  ): Promise<LocateResultElement | null | undefined>;
+
+  /**
    * Optional structured candidate provider. Native runtimes can return a
    * compact list of likely elements so the AI only adjudicates among candidates
    * instead of scanning the whole screenshot.

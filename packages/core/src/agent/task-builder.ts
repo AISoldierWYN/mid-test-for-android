@@ -532,27 +532,35 @@ export class TaskBuilder {
                 param.cacheable,
               );
 
-        if (
+        const shouldVerifyLocateCache = Boolean(
           locateCacheRecord &&
-          cacheEntry &&
-          param.cacheable !== false &&
-          this.interface.rectMatchesCacheFeature &&
-          !isPlanHit &&
-          !isXpathHit
+            cacheEntry &&
+            param.cacheable !== false &&
+            this.interface.rectMatchesCacheFeature &&
+            !isPlanHit &&
+            !isXpathHit,
+        );
+        let locateCacheVerification:
+          | {
+              status: 'success';
+              source: string;
+              reason?: string;
+            }
+          | {
+              status: 'failure';
+              source: string;
+              reason?: string;
+            }
+          | undefined;
+        if (
+          shouldVerifyLocateCache &&
+          elementFromCacheResult &&
+          locateCacheRecord
         ) {
-          this.taskCache?.recordCacheVerification(
-            locateCacheRecord.cacheContent,
-            elementFromCacheResult
-              ? {
-                  status: 'success',
-                  source: 'rectMatchesCacheFeature',
-                }
-              : {
-                  status: 'failure',
-                  source: 'rectMatchesCacheFeature',
-                  reason: 'cached selector did not resolve on current UI',
-                },
-          );
+          locateCacheVerification = {
+            status: 'success',
+            source: 'rectMatchesCacheFeature',
+          };
         }
 
         // elementFromCacheResult is in logical coordinates, which should be transformed to screenshot coordinates;
@@ -596,6 +604,45 @@ export class TaskBuilder {
 
         const isStructuredHit = !!elementFromStructured;
 
+        let elementFromScrollResult: LocateResultElement | null | undefined;
+        if (
+          !isXpathHit &&
+          !isCacheHit &&
+          !isPlanHit &&
+          !isStructuredHit &&
+          cacheEntry &&
+          param.cacheable !== false &&
+          this.interface.scrollUntilVisible
+        ) {
+          try {
+            elementFromScrollResult = await this.interface.scrollUntilVisible(
+              param,
+              {
+                uiContext,
+                modelConfig: modelConfigForDefaultIntent,
+                cacheEntry,
+              },
+            );
+            if (elementFromScrollResult) {
+              locateCacheVerification = {
+                status: 'success',
+                source: 'scrollUntilVisible',
+              };
+            }
+          } catch (error) {
+            debug('scrollUntilVisible failed: %s', error);
+          }
+        }
+
+        const elementFromScroll = elementFromScrollResult
+          ? transformLogicalElementToScreenshot(
+              elementFromScrollResult,
+              shrunkShotToLogicalRatio,
+            )
+          : undefined;
+
+        const isScrollHit = !!elementFromScroll;
+
         let elementFromCandidateResult: LocateResultElement | null | undefined;
         let candidateSelection:
           | {
@@ -610,6 +657,7 @@ export class TaskBuilder {
           !isCacheHit &&
           !isPlanHit &&
           !isStructuredHit &&
+          !isScrollHit &&
           this.candidateAdjudication.enabled &&
           this.interface.structuredLocateCandidates
         ) {
@@ -678,6 +726,7 @@ export class TaskBuilder {
           !isCacheHit &&
           !isPlanHit &&
           !isStructuredHit &&
+          !isScrollHit &&
           !isCandidateHit
         ) {
           try {
@@ -708,8 +757,28 @@ export class TaskBuilder {
           elementFromXpath ||
           elementFromCache ||
           elementFromStructured ||
+          elementFromScroll ||
           elementFromCandidate ||
           elementFromAiLocate;
+
+        if (
+          shouldVerifyLocateCache &&
+          locateCacheRecord &&
+          !locateCacheVerification
+        ) {
+          locateCacheVerification = {
+            status: 'failure',
+            source: 'rectMatchesCacheFeature',
+            reason: 'cached selector did not resolve on current UI',
+          };
+        }
+
+        if (locateCacheRecord && locateCacheVerification) {
+          this.taskCache?.recordCacheVerification(
+            locateCacheRecord.cacheContent,
+            locateCacheVerification,
+          );
+        }
 
         // Check if locate cache already exists (for planHitFlag case)
         const locateCacheAlreadyExists = hasNonEmptyCache(
@@ -829,6 +898,15 @@ export class TaskBuilder {
             from: 'Structure',
             context: {
               prompt: param.prompt,
+              cacheToSave: currentCacheEntry,
+            },
+          };
+        } else if (isScrollHit) {
+          hitBy = {
+            from: 'Scroll recipe',
+            context: {
+              prompt: param.prompt,
+              cacheEntry,
               cacheToSave: currentCacheEntry,
             },
           };

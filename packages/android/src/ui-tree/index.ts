@@ -15,6 +15,10 @@ import {
   signatureScore,
   textSimilarity,
 } from '../scoped-selector';
+import {
+  type AndroidScrollRecipeCache,
+  buildAndroidScrollRecipeCache,
+} from '../scroll-fast-path';
 
 export interface AndroidUiTreeScale {
   x: number;
@@ -40,6 +44,7 @@ export interface AndroidElementCacheFeature extends ElementCacheFeature {
   xpaths?: string[];
   android?: AndroidNodeFeature;
   androidSelector?: AndroidScopedSelector;
+  androidScroll?: AndroidScrollRecipeCache;
 }
 
 export interface AndroidCacheFeatureCandidate {
@@ -181,6 +186,13 @@ export function matchAndroidCacheFeature(
         ...best,
         candidates: candidates.slice(0, 5),
       };
+    }
+    if (androidSelector) {
+      throw new Error(
+        `No matching Android UI node found for scoped cache feature: ${JSON.stringify(
+          feature,
+        )}`,
+      );
     }
   }
 
@@ -367,6 +379,7 @@ function buildCacheFeature(
       targetDescription,
     },
     androidSelector: buildAndroidScopedSelector(context),
+    androidScroll: buildAndroidScrollRecipeCache(context),
   };
 }
 
@@ -551,7 +564,7 @@ function scoreCacheCandidate(
     selector?.rowText &&
     textSimilarity(selector.rowText, contextText(rowContext?.tree)) < 0.75
   ) {
-    confidence = Math.max(0, confidence - 0.3);
+    confidence = Math.min(confidence, 0.44);
     reasons.push('row-context-mismatch');
   }
 

@@ -863,6 +863,8 @@ wrong-action rate after cache hit
 
 ### Phase D: Scroll And List Fast Path
 
+状态：已完成第一版实现。Android 已增加 scrollable container 检测、scroll recipe cache 特征、`scrollUntilVisible` 确定性执行器和 `ScrollUntilVisible` action；当 cached selector 当前不可见时，TaskBuilder 会优先尝试 Android scroll recipe，再进入 candidate adjudication/CV locate。row-scoped cache 会携带 scroll container 与 anchors，避免 RecyclerView 复用后只靠旧坐标命中。
+
 交付：
 
 - 检测 scrollable container。

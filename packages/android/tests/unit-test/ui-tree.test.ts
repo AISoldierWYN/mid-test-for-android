@@ -7,6 +7,11 @@ import {
   locateAndroidElementWithScore,
 } from '../../src/fast-locator';
 import {
+  buildAndroidScrollRecipe,
+  detectAndroidScrollableContainers,
+  getAndroidScrollRecipeCache,
+} from '../../src/scroll-fast-path';
+import {
   buildAndroidCacheFeatureForPoint,
   matchAndroidCacheFeature,
   parseBounds,
@@ -50,6 +55,22 @@ const duplicateRowsReorderedXml = String.raw`
     </node>
     <node index="1" text="" resource-id="" class="android.widget.LinearLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,100][400,200]">
       <node index="0" text="Alice" resource-id="com.example:id/name" class="android.widget.TextView" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[20,120][180,180]" />
+      <node index="1" text="Delete" resource-id="com.example:id/delete" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[260,120][380,180]" />
+    </node>
+  </node>
+</hierarchy>
+`;
+
+const duplicateRowsWithoutBobXml = String.raw`
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<hierarchy rotation="0">
+  <node index="0" text="" resource-id="com.example:id/list" class="androidx.recyclerview.widget.RecyclerView" package="com.example" content-desc="" clickable="false" enabled="true" scrollable="true" bounds="[0,0][400,500]">
+    <node index="0" text="" resource-id="" class="android.widget.LinearLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,0][400,100]">
+      <node index="0" text="Alice" resource-id="com.example:id/name" class="android.widget.TextView" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[20,20][180,80]" />
+      <node index="1" text="Delete" resource-id="com.example:id/delete" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[260,20][380,80]" />
+    </node>
+    <node index="1" text="" resource-id="" class="android.widget.LinearLayout" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[0,100][400,200]">
+      <node index="0" text="Carol" resource-id="com.example:id/name" class="android.widget.TextView" package="com.example" content-desc="" clickable="false" enabled="true" bounds="[20,120][180,180]" />
       <node index="1" text="Delete" resource-id="com.example:id/delete" class="android.widget.Button" package="com.example" content-desc="" clickable="true" enabled="true" bounds="[260,120][380,180]" />
     </node>
   </node>
@@ -100,6 +121,77 @@ describe('Android UI tree parser', () => {
         resourceId: 'com.example:id/login',
         text: 'Sign in',
       },
+    });
+  });
+
+  it('detects scrollable containers and records scroll recipes in cache features', () => {
+    const tree = parseUiautomatorXml(duplicateRowsXml);
+    const containers = detectAndroidScrollableContainers(tree);
+
+    expect(containers[0]).toMatchObject({
+      rect: { left: 0, top: 0, width: 400, height: 500 },
+      reasons: expect.arrayContaining(['scrollable-attr']),
+      anchors: expect.arrayContaining(['Alice', 'Bob']),
+    });
+
+    const feature = buildAndroidCacheFeatureForPoint(tree, [320, 150], {
+      targetDescription: 'Bob delete button',
+    });
+    expect(feature.androidScroll).toMatchObject({
+      container: {
+        target: {
+          resourceId: 'com.example:id/list',
+          className: 'androidx.recyclerview.widget.RecyclerView',
+        },
+      },
+      anchors: expect.arrayContaining(['Alice', 'Bob']),
+    });
+
+    const recipe = buildAndroidScrollRecipe(tree, {
+      cacheEntry: feature,
+      targetText: 'Bob delete button',
+    });
+    expect(recipe).toMatchObject({
+      direction: 'down',
+      maxAttempts: 6,
+      targetText: 'Bob delete button',
+      container: {
+        rect: { left: 0, top: 0, width: 400, height: 500 },
+      },
+    });
+    expect(getAndroidScrollRecipeCache(feature)?.anchors).toContain('Bob');
+  });
+
+  it('scrolls deterministically until a cached row-scoped target is visible', async () => {
+    const targetTree = parseUiautomatorXml(duplicateRowsXml);
+    const firstTree = parseUiautomatorXml(duplicateRowsWithoutBobXml);
+    const feature = buildAndroidCacheFeatureForPoint(targetTree, [320, 150], {
+      targetDescription: 'Bob delete button',
+    });
+    const device = new AndroidDevice('test-device', {
+      diagnostics: false,
+      scrollFastPath: { settleMs: 0, maxAttempts: 2 },
+    });
+    const snapshots = [firstTree, targetTree];
+    let snapshotIndex = 0;
+    vi.spyOn(device, 'getElementsNodeTree').mockImplementation(async () => {
+      return snapshots[snapshotIndex];
+    });
+    const scrollDown = vi
+      .spyOn(device, 'scrollDown')
+      .mockImplementation(async () => {
+        snapshotIndex = 1;
+      });
+
+    const result = await device.scrollUntilVisible(
+      { prompt: 'Bob delete button' },
+      { cacheEntry: feature },
+    );
+
+    expect(scrollDown).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      center: [320, 150],
+      rect: { left: 260, top: 120, width: 120, height: 60 },
     });
   });
 
