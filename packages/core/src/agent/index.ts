@@ -13,10 +13,14 @@ export {
 } from './ui-utils';
 
 export {
+  type CacheGovernanceRecordSnapshot,
+  type CacheGovernanceRecommendation,
+  type CacheGovernanceSnapshot,
   type CacheEntryState,
   type CacheEntryStats,
   type CacheRecord,
   type CacheScope,
+  type CacheScopeMatchDetail,
   type CacheScopeMatch,
   type CacheVerificationRecord,
   type CacheVerificationResult,
@@ -24,6 +28,7 @@ export {
   type OperationCache,
   type PlanningCache,
   TaskCache,
+  describeCacheScopeMatch,
 } from './task-cache';
 export { cacheFileExt } from './task-cache';
 export {

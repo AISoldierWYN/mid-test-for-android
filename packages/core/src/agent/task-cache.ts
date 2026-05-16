@@ -49,16 +49,31 @@ export interface CacheEntryStats {
   hitCount?: number;
   successCount?: number;
   failureCount?: number;
+  skipCount?: number;
   lastHitAt?: string;
   lastSuccessAt?: string;
   lastFailureAt?: string;
+  lastSkipAt?: string;
 }
 
 export interface CacheEntryState {
   status?: 'active' | 'degraded' | 'stale' | 'disabled';
   confidence?: number;
   reason?: string;
+  lastSkipReason?: string;
+  lastScopeMatch?: CacheScopeMatch;
+  refreshRecommended?: boolean;
+  demotedAt?: string;
   updatedAt?: string;
+}
+
+export interface CacheScopeMatchDetail {
+  result: CacheScopeMatch;
+  comparedKeys: Array<keyof CacheScope>;
+  missingCurrentKeys: Array<keyof CacheScope>;
+  mismatchedKeys: Array<keyof CacheScope>;
+  driftKeys: Array<keyof CacheScope>;
+  reason?: string;
 }
 
 export interface CacheVerificationResult {
@@ -107,6 +122,42 @@ export interface OperationCache extends CacheEntryMetadata {
 
 export type CacheRecord = PlanningCache | OperationCache | LocateCache;
 
+export type CacheGovernanceRecommendation =
+  | 'use'
+  | 'verify'
+  | 'refresh'
+  | 'skip'
+  | 'disabled';
+
+export interface CacheGovernanceRecordSnapshot {
+  index: number;
+  type: CacheRecord['type'];
+  prompt?: TUserPrompt;
+  operationKey?: string;
+  scope?: CacheScope;
+  state: CacheEntryState;
+  stats: CacheEntryStats;
+  lastVerification?: CacheVerificationRecord;
+  scopeMatch?: CacheScopeMatchDetail;
+  governance: {
+    usable: boolean;
+    recommendation: CacheGovernanceRecommendation;
+    confidence: number;
+    status: NonNullable<CacheEntryState['status']>;
+    refreshRecommended: boolean;
+    reason?: string;
+  };
+}
+
+export interface CacheGovernanceSnapshot {
+  cacheId: string;
+  cacheFilePath?: string;
+  total: number;
+  byType: Record<CacheRecord['type'], number>;
+  byStatus: Record<NonNullable<CacheEntryState['status']>, number>;
+  records: CacheGovernanceRecordSnapshot[];
+}
+
 export interface MatchCacheResult<T extends CacheRecord> {
   cacheContent: T;
   cacheUsable: boolean;
@@ -127,6 +178,24 @@ export type CacheFileContent = {
 const lowestSupportedMidsceneVersion = '0.16.10';
 export const cacheFileExt = '.cache.yaml';
 const CACHE_FAILURES_BEFORE_STALE = 3;
+const CACHE_MIN_CONFIDENCE_TO_MATCH = 0.2;
+const CACHE_SCOPE_KEYS: Array<keyof CacheScope> = [
+  'interfaceType',
+  'url',
+  'packageName',
+  'activity',
+  'pageFingerprint',
+  'sdk',
+  'manufacturer',
+  'locale',
+  'orientation',
+  'displayId',
+  'appVersion',
+];
+const CACHE_SCOPE_INVALIDATION_KEYS: Array<keyof CacheScope> = [
+  'pageFingerprint',
+  'appVersion',
+];
 
 export class TaskCache {
   cacheId: string;
@@ -225,14 +294,22 @@ export class TaskCache {
     for (let i = 0; i < this.cacheOriginalLength; i++) {
       const item = this.cache.caches[i];
       const key = `${type}:${promptStr}:${i}`;
-      const scopeMatch = matchCacheScope(item.scope, scope);
       if (
         item.type === type &&
         cacheIdentityMatches(item, prompt, operationKey) &&
-        scopeMatch !== 'mismatch' &&
-        !isCacheEntrySkipped(item) &&
         !this.matchedCacheIndices.has(key)
       ) {
+        const governance = this.evaluateCacheGovernance(item, scope);
+        if (!governance.usable) {
+          debug(
+            'cache skipped, type: %s, prompt: %s, index: %d, reason: %s',
+            type,
+            prompt,
+            i,
+            governance.skipReason,
+          );
+          continue;
+        }
         if (item.type === 'locate') {
           const locateItem = item as LocateCache;
           if (!locateItem.cache && Array.isArray(locateItem.xpaths)) {
@@ -243,18 +320,18 @@ export class TaskCache {
           }
         }
         this.matchedCacheIndices.add(key);
-        this.recordCacheHitInMemory(item);
+        this.recordCacheHitInMemory(item, governance.scopeMatchDetail);
         debug(
           'cache found and marked as used, type: %s, prompt: %s, index: %d, scopeMatch: %s',
           type,
           prompt,
           i,
-          scopeMatch,
+          governance.scopeMatch,
         );
         return {
           cacheContent: item,
           cacheUsable: true,
-          scopeMatch,
+          scopeMatch: governance.scopeMatch,
           updateFn: (cb: (cache: PlanningCache | LocateCache) => void) => {
             debug(
               'will call updateFn to update cache, type: %s, prompt: %s, index: %d',
@@ -354,26 +431,33 @@ export class TaskCache {
         continue;
       }
       const key = `operation:${operationKey}:${i}`;
-      const scopeMatch = matchCacheScope(item.scope, scope);
       if (
         item.operationKey === operationKey &&
         item.yamlWorkflow?.trim() &&
-        scopeMatch !== 'mismatch' &&
-        !isCacheEntrySkipped(item) &&
         !this.matchedCacheIndices.has(key)
       ) {
+        const governance = this.evaluateCacheGovernance(item, scope);
+        if (!governance.usable) {
+          debug(
+            'operation cache skipped, key: %s, index: %d, reason: %s',
+            operationKey,
+            i,
+            governance.skipReason,
+          );
+          continue;
+        }
         this.matchedCacheIndices.add(key);
-        this.recordCacheHitInMemory(item);
+        this.recordCacheHitInMemory(item, governance.scopeMatchDetail);
         debug(
           'operation cache found and marked as used, key: %s, index: %d, scopeMatch: %s',
           operationKey,
           i,
-          scopeMatch,
+          governance.scopeMatch,
         );
         return {
           cacheContent: item,
           cacheUsable: true,
-          scopeMatch,
+          scopeMatch: governance.scopeMatch,
           updateFn: (cb: (cache: OperationCache) => void) => {
             cb(item);
 
@@ -405,6 +489,37 @@ export class TaskCache {
       return;
     }
     this.flushCacheToFile();
+  }
+
+  getGovernanceSnapshot(currentScope?: CacheScope): CacheGovernanceSnapshot {
+    const records = this.cache.caches.map((record, index) =>
+      createCacheGovernanceRecordSnapshot(record, index, currentScope),
+    );
+    const byType: CacheGovernanceSnapshot['byType'] = {
+      plan: 0,
+      operation: 0,
+      locate: 0,
+    };
+    const byStatus: CacheGovernanceSnapshot['byStatus'] = {
+      active: 0,
+      degraded: 0,
+      stale: 0,
+      disabled: 0,
+    };
+
+    for (const record of records) {
+      byType[record.type] += 1;
+      byStatus[record.governance.status] += 1;
+    }
+
+    return {
+      cacheId: this.cacheId,
+      cacheFilePath: this.cacheFilePath,
+      total: records.length,
+      byType,
+      byStatus,
+      records,
+    };
   }
 
   appendCache(cache: CacheRecord) {
@@ -751,7 +866,47 @@ export class TaskCache {
     };
   }
 
-  private recordCacheHitInMemory(record: CacheRecord): void {
+  private evaluateCacheGovernance(
+    record: CacheRecord,
+    currentScope?: CacheScope,
+  ): {
+    usable: boolean;
+    scopeMatch: CacheScopeMatch;
+    scopeMatchDetail: CacheScopeMatchDetail;
+    skipReason?: string;
+  } {
+    const scopeMatchDetail = describeCacheScopeMatch(
+      record.scope,
+      currentScope,
+    );
+    const governance = resolveCacheGovernance(record, scopeMatchDetail);
+    if (!governance.usable) {
+      const shouldDemote =
+        scopeMatchDetail.result === 'mismatch' &&
+        shouldDemoteForScopeDrift(record.scope, currentScope, scopeMatchDetail);
+      this.recordCacheSkipInMemory(
+        record,
+        governance.reason ?? 'cache skipped by governance policy',
+        scopeMatchDetail,
+        {
+          demote: shouldDemote,
+          refreshRecommended: governance.recommendation === 'refresh',
+        },
+      );
+    }
+
+    return {
+      usable: governance.usable,
+      scopeMatch: scopeMatchDetail.result,
+      scopeMatchDetail,
+      skipReason: governance.reason,
+    };
+  }
+
+  private recordCacheHitInMemory(
+    record: CacheRecord,
+    scopeMatchDetail?: CacheScopeMatchDetail,
+  ): void {
     const now = new Date().toISOString();
     record.stats = {
       ...record.stats,
@@ -761,6 +916,55 @@ export class TaskCache {
     record.state ??= {
       status: 'active',
       confidence: 1,
+      updatedAt: now,
+    };
+    record.state = {
+      ...record.state,
+      lastScopeMatch: scopeMatchDetail?.result ?? record.state.lastScopeMatch,
+      updatedAt: now,
+    };
+  }
+
+  private recordCacheSkipInMemory(
+    record: CacheRecord,
+    reason: string,
+    scopeMatchDetail: CacheScopeMatchDetail,
+    options?: { demote?: boolean; refreshRecommended?: boolean },
+  ): void {
+    const now = new Date().toISOString();
+    record.stats = {
+      ...record.stats,
+      skipCount: (record.stats?.skipCount ?? 0) + 1,
+      lastSkipAt: now,
+    };
+
+    const currentState = record.state ?? {
+      status: 'active' as const,
+      confidence: 1,
+    };
+    const currentStatus = currentState.status ?? 'active';
+    const demotedStatus =
+      currentStatus === 'disabled' || currentStatus === 'stale'
+        ? currentStatus
+        : 'degraded';
+    const nextConfidence = options?.demote
+      ? Math.max(0, (currentState.confidence ?? 1) - 0.15)
+      : (currentState.confidence ?? 1);
+    const shouldPersistReason =
+      Boolean(options?.demote) || Boolean(options?.refreshRecommended);
+
+    record.state = {
+      ...currentState,
+      status: options?.demote ? demotedStatus : currentStatus,
+      confidence: nextConfidence,
+      reason: shouldPersistReason ? reason : currentState.reason,
+      lastSkipReason: reason,
+      lastScopeMatch: scopeMatchDetail.result,
+      refreshRecommended:
+        currentState.refreshRecommended ||
+        Boolean(options?.demote) ||
+        Boolean(options?.refreshRecommended),
+      demotedAt: options?.demote ? now : currentState.demotedAt,
       updatedAt: now,
     };
   }
@@ -869,8 +1073,11 @@ function updateCacheVerificationState(
       lastSuccessAt: now,
     };
     record.state = {
+      ...record.state,
       status: 'active',
       confidence,
+      reason: undefined,
+      refreshRecommended: false,
       updatedAt: now,
     };
     record.lastVerification = lastVerification;
@@ -885,18 +1092,15 @@ function updateCacheVerificationState(
     lastFailureAt: now,
   };
   record.state = {
+    ...record.state,
     status: failureCount >= CACHE_FAILURES_BEFORE_STALE ? 'stale' : 'degraded',
     confidence,
     reason: verification.reason,
+    refreshRecommended: true,
+    demotedAt: now,
     updatedAt: now,
   };
   record.lastVerification = lastVerification;
-}
-
-function isCacheEntrySkipped(record: CacheRecord): boolean {
-  return (
-    record.state?.status === 'disabled' || record.state?.status === 'stale'
-  );
 }
 
 function cacheIdentityMatches(
@@ -926,31 +1130,201 @@ function hasComparableScopeValue(value: unknown): boolean {
   );
 }
 
+function scopeValuesEqual(
+  cachedScope: CacheScope | undefined,
+  currentScope: CacheScope | undefined,
+  key: keyof CacheScope,
+): boolean {
+  const cachedValue = cachedScope?.[key];
+  const currentValue = currentScope?.[key];
+  if (
+    !hasComparableScopeValue(cachedValue) ||
+    !hasComparableScopeValue(currentValue)
+  ) {
+    return false;
+  }
+  return (
+    valueToComparableString(cachedValue) ===
+    valueToComparableString(currentValue)
+  );
+}
+
+function shouldDemoteForScopeDrift(
+  cachedScope: CacheScope | undefined,
+  currentScope: CacheScope | undefined,
+  detail: CacheScopeMatchDetail,
+): boolean {
+  if (detail.driftKeys.length === 0) {
+    return false;
+  }
+  const ownerKeys: Array<keyof CacheScope> = [
+    'interfaceType',
+    'packageName',
+    'activity',
+    'url',
+  ];
+  const hasOwnerMismatch = ownerKeys.some((key) =>
+    detail.mismatchedKeys.includes(key),
+  );
+  if (hasOwnerMismatch) {
+    return false;
+  }
+  return ownerKeys.some((key) =>
+    scopeValuesEqual(cachedScope, currentScope, key),
+  );
+}
+
+function normalizeCacheEntryState(record: CacheRecord): CacheEntryState {
+  return {
+    status: record.state?.status ?? 'active',
+    confidence: record.state?.confidence ?? 1,
+    reason: record.state?.reason,
+    lastSkipReason: record.state?.lastSkipReason,
+    lastScopeMatch: record.state?.lastScopeMatch,
+    refreshRecommended: record.state?.refreshRecommended ?? false,
+    demotedAt: record.state?.demotedAt,
+    updatedAt: record.state?.updatedAt,
+  };
+}
+
+function resolveCacheGovernance(
+  record: CacheRecord,
+  scopeMatchDetail?: CacheScopeMatchDetail,
+): {
+  usable: boolean;
+  recommendation: CacheGovernanceRecommendation;
+  confidence: number;
+  status: NonNullable<CacheEntryState['status']>;
+  refreshRecommended: boolean;
+  reason?: string;
+} {
+  const state = normalizeCacheEntryState(record);
+  const status = state.status ?? 'active';
+  const confidence = state.confidence ?? 1;
+  const refreshRecommended = state.refreshRecommended ?? false;
+
+  if (status === 'disabled') {
+    return {
+      usable: false,
+      recommendation: 'disabled',
+      confidence,
+      status,
+      refreshRecommended,
+      reason: state.reason ?? 'cache entry is disabled',
+    };
+  }
+
+  if (status === 'stale') {
+    return {
+      usable: false,
+      recommendation: 'refresh',
+      confidence,
+      status,
+      refreshRecommended: true,
+      reason: state.reason ?? 'cache entry is stale',
+    };
+  }
+
+  if (confidence < CACHE_MIN_CONFIDENCE_TO_MATCH) {
+    return {
+      usable: false,
+      recommendation: 'refresh',
+      confidence,
+      status,
+      refreshRecommended: true,
+      reason: `cache confidence ${confidence.toFixed(2)} is below ${CACHE_MIN_CONFIDENCE_TO_MATCH.toFixed(2)}`,
+    };
+  }
+
+  if (scopeMatchDetail?.result === 'mismatch') {
+    return {
+      usable: false,
+      recommendation:
+        scopeMatchDetail.driftKeys.length > 0 ? 'refresh' : 'skip',
+      confidence,
+      status,
+      refreshRecommended:
+        refreshRecommended || scopeMatchDetail.driftKeys.length > 0,
+      reason:
+        scopeMatchDetail.reason ??
+        `cache scope mismatch: ${scopeMatchDetail.mismatchedKeys.join(', ')}`,
+    };
+  }
+
+  if (
+    scopeMatchDetail?.result === 'unknown' ||
+    scopeMatchDetail?.result === 'compatible'
+  ) {
+    return {
+      usable: true,
+      recommendation: refreshRecommended ? 'refresh' : 'verify',
+      confidence,
+      status,
+      refreshRecommended,
+      reason: state.reason,
+    };
+  }
+
+  return {
+    usable: true,
+    recommendation: refreshRecommended ? 'refresh' : 'use',
+    confidence,
+    status,
+    refreshRecommended,
+    reason: state.reason,
+  };
+}
+
+function createCacheGovernanceRecordSnapshot(
+  record: CacheRecord,
+  index: number,
+  currentScope?: CacheScope,
+): CacheGovernanceRecordSnapshot {
+  const scopeMatch = currentScope
+    ? describeCacheScopeMatch(record.scope, currentScope)
+    : undefined;
+  const governance = resolveCacheGovernance(record, scopeMatch);
+  return {
+    index,
+    type: record.type,
+    prompt: 'prompt' in record ? record.prompt : undefined,
+    operationKey: record.operationKey,
+    scope: record.scope,
+    state: normalizeCacheEntryState(record),
+    stats: record.stats ?? {},
+    lastVerification: record.lastVerification,
+    scopeMatch,
+    governance,
+  };
+}
+
 export function matchCacheScope(
   cachedScope?: CacheScope,
   currentScope?: CacheScope,
 ): CacheScopeMatch {
+  return describeCacheScopeMatch(cachedScope, currentScope).result;
+}
+
+export function describeCacheScopeMatch(
+  cachedScope?: CacheScope,
+  currentScope?: CacheScope,
+): CacheScopeMatchDetail {
+  const comparedKeys: Array<keyof CacheScope> = [];
+  const missingCurrentKeys: Array<keyof CacheScope> = [];
+  const mismatchedKeys: Array<keyof CacheScope> = [];
+
   if (!cachedScope || !currentScope) {
-    return 'unknown';
+    return {
+      result: 'unknown',
+      comparedKeys,
+      missingCurrentKeys,
+      mismatchedKeys,
+      driftKeys: [],
+      reason: 'cached or current cache scope is missing',
+    };
   }
 
-  const keys: Array<keyof CacheScope> = [
-    'interfaceType',
-    'url',
-    'packageName',
-    'activity',
-    'pageFingerprint',
-    'sdk',
-    'manufacturer',
-    'locale',
-    'orientation',
-    'displayId',
-    'appVersion',
-  ];
-  let comparedCount = 0;
-  let missingCurrentValue = false;
-
-  for (const key of keys) {
+  for (const key of CACHE_SCOPE_KEYS) {
     const cachedValue = cachedScope[key];
     if (!hasComparableScopeValue(cachedValue)) {
       continue;
@@ -958,21 +1332,61 @@ export function matchCacheScope(
 
     const currentValue = currentScope[key];
     if (!hasComparableScopeValue(currentValue)) {
-      missingCurrentValue = true;
+      missingCurrentKeys.push(key);
       continue;
     }
 
-    comparedCount += 1;
+    comparedKeys.push(key);
     if (
       valueToComparableString(cachedValue) !==
       valueToComparableString(currentValue)
     ) {
-      return 'mismatch';
+      mismatchedKeys.push(key);
     }
   }
 
-  if (comparedCount === 0) {
-    return 'unknown';
+  const driftKeys = mismatchedKeys.filter((key) =>
+    CACHE_SCOPE_INVALIDATION_KEYS.includes(key),
+  );
+
+  if (mismatchedKeys.length > 0) {
+    return {
+      result: 'mismatch',
+      comparedKeys,
+      missingCurrentKeys,
+      mismatchedKeys,
+      driftKeys,
+      reason: `cache scope mismatch: ${mismatchedKeys.join(', ')}`,
+    };
   }
-  return missingCurrentValue ? 'compatible' : 'exact';
+
+  if (comparedKeys.length === 0) {
+    return {
+      result: 'unknown',
+      comparedKeys,
+      missingCurrentKeys,
+      mismatchedKeys,
+      driftKeys,
+      reason: 'no comparable cache scope keys',
+    };
+  }
+
+  if (missingCurrentKeys.length > 0) {
+    return {
+      result: 'compatible',
+      comparedKeys,
+      missingCurrentKeys,
+      mismatchedKeys,
+      driftKeys,
+      reason: `current cache scope is missing: ${missingCurrentKeys.join(', ')}`,
+    };
+  }
+
+  return {
+    result: 'exact',
+    comparedKeys,
+    missingCurrentKeys,
+    mismatchedKeys,
+    driftKeys,
+  };
 }

@@ -89,7 +89,11 @@ import {
   type ExecutionReportStats,
   collectExecutionReportStats,
 } from './report-stats';
-import { TaskCache } from './task-cache';
+import {
+  type CacheGovernanceSnapshot,
+  type CacheScope,
+  TaskCache,
+} from './task-cache';
 import {
   TaskExecutionError,
   TaskExecutor,
@@ -466,6 +470,22 @@ export class Agent<
 
   getExperienceGraph() {
     return this.taskCache?.getExperienceGraph();
+  }
+
+  getCacheGovernanceSnapshot(
+    scope?: CacheScope,
+  ): CacheGovernanceSnapshot | undefined {
+    return this.taskCache?.getGovernanceSnapshot(scope);
+  }
+
+  async getCurrentCacheGovernanceSnapshot(): Promise<
+    CacheGovernanceSnapshot | undefined
+  > {
+    if (!this.taskCache) {
+      return undefined;
+    }
+    const scope = await captureCacheScope(this.interface);
+    return this.taskCache.getGovernanceSnapshot(scope);
   }
 
   recordPathExperience(input: PathExperienceInput) {

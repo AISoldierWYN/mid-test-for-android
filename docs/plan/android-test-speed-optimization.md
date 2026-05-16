@@ -928,6 +928,8 @@ wrong-action rate after cache hit
 
 ### Phase H: Cache Governance And Learning
 
+状态：已完成第一版实现。`TaskCache` 已新增 cache governance snapshot，用于 Playground/report/调试侧查看每条 cache 的命中状态、confidence、success/failure/skip 计数、scope match 详情、跳过原因和 refresh 建议；命中前会统一检查 disabled/stale/低 confidence/page fingerprint 或 app version 漂移，并对同 app/page 的强漂移自动降级和建议刷新。
+
 交付：
 
 - cache entry confidence score。
