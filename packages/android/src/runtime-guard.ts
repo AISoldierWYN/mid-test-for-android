@@ -99,6 +99,8 @@ const RECOVERY_ACTIONS = new Set([
   'Terminate',
   'AndroidGetSystemState',
   'AndroidSetPermission',
+  'AndroidAssert',
+  'AndroidExtract',
   'KeyboardPress',
   'AndroidBackButton',
   'AndroidHomeButton',

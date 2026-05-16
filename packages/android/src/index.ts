@@ -38,6 +38,11 @@ export {
   scrollRecipeAnchorSignature,
 } from './scroll-fast-path';
 export {
+  evaluateAndroidAssertion,
+  extractAndroidDeterministic,
+  extractAndroidUiTree,
+} from './assertion';
+export {
   collectAndroidSystemStateWithAdb,
   mutateAndroidPermissionWithAdb,
   normalizeAndroidSystemStateRequest,
@@ -64,6 +69,29 @@ export {
   DEFAULT_ANDROID_HELPER_LOCAL_PORT,
   DEFAULT_ANDROID_HELPER_TIMEOUT_MS,
 } from './helper-client';
+export type {
+  AndroidAssertionCheck,
+  AndroidAssertionPredicate,
+  AndroidAssertionProviders,
+  AndroidAssertionResult,
+  AndroidDeterministicSource,
+  AndroidExtractionRequest,
+  AndroidExtractionResult,
+  AndroidForegroundAssertionPredicate,
+  AndroidLogcatAssertionPredicate,
+  AndroidLogcatRequest,
+  AndroidNotificationAssertionPredicate,
+  AndroidPermissionAssertionPredicate,
+  AndroidPropertyAssertionPredicate,
+  AndroidSettingsAssertionPredicate,
+  AndroidShellAssertionPredicate,
+  AndroidUiAssertionPredicate,
+  AndroidUiExtractionNode,
+  AndroidUiExtractionQuery,
+  AndroidUiExtractionResult,
+  AndroidUiNodeQuery,
+  AndroidValueExpectation,
+} from './assertion';
 export type {
   AndroidActionStep,
   AndroidDiagnosticsOptions,

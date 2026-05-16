@@ -455,6 +455,100 @@ describe('AndroidDevice helper integration', () => {
     );
   });
 
+  it('exposes deterministic assertions as an action-space command', async () => {
+    const device = new AndroidDevice('test-device', {
+      scrcpyConfig: { enabled: false },
+    });
+    vi.spyOn(device, 'getElementsNodeTree').mockResolvedValue(
+      parseUiautomatorXml(sampleXml),
+    );
+    vi.spyOn(device, 'getAndroidSystemState').mockResolvedValue({
+      source: 'adb',
+      foreground: {
+        packageName: 'com.example',
+        activity: '.MainActivity',
+      },
+    });
+    const action = device
+      .actionSpace()
+      .find((item) => item.name === 'AndroidAssert');
+
+    const result = await action?.call(
+      {
+        predicate: {
+          ui: { allText: ['Sign in'] },
+          foreground: { packageName: 'com.example' },
+        },
+      } as any,
+      {} as any,
+    );
+
+    expect(JSON.parse(result as string)).toMatchObject({
+      pass: true,
+      source: ['ui-tree', 'system-state'],
+    });
+  });
+
+  it('fails deterministic assertion actions when requested predicate is false', async () => {
+    const device = new AndroidDevice('test-device', {
+      scrcpyConfig: { enabled: false },
+    });
+    vi.spyOn(device, 'getElementsNodeTree').mockResolvedValue(
+      parseUiautomatorXml(sampleXml),
+    );
+    const action = device
+      .actionSpace()
+      .find((item) => item.name === 'AndroidAssert');
+
+    await expect(
+      action?.call(
+        {
+          predicate: {
+            ui: { allText: ['Bluetooth'] },
+          },
+        } as any,
+        {} as any,
+      ),
+    ).rejects.toThrow('Android deterministic assertion failed');
+  });
+
+  it('exposes deterministic extraction as an action-space command', async () => {
+    const device = new AndroidDevice('test-device', {
+      scrcpyConfig: { enabled: false },
+    });
+    vi.spyOn(device, 'getElementsNodeTree').mockResolvedValue(
+      parseUiautomatorXml(sampleXml),
+    );
+    const action = device
+      .actionSpace()
+      .find((item) => item.name === 'AndroidExtract');
+
+    const result = await action?.call(
+      {
+        source: 'uiTree',
+        ui: {
+          textContains: 'sign',
+          includeBounds: true,
+        },
+      } as any,
+      {} as any,
+    );
+
+    expect(JSON.parse(result as string)).toMatchObject({
+      source: 'ui-tree',
+      data: {
+        count: 1,
+        nodes: [
+          {
+            text: 'Sign in',
+            resourceId: 'com.example:id/login',
+            rect: { left: 20, top: 40, width: 160, height: 60 },
+          },
+        ],
+      },
+    });
+  });
+
   it('sets permissions through helper and falls back to package manager commands', async () => {
     const fetch = vi.fn().mockResolvedValue(
       jsonResponse({

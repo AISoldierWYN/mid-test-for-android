@@ -59,6 +59,14 @@ import { normalizeForComparison, repeat } from '@midscene/shared/utils';
 
 import { ADB } from 'appium-adb';
 import {
+  type AndroidAssertionPredicate,
+  type AndroidAssertionResult,
+  type AndroidExtractionRequest,
+  type AndroidExtractionResult,
+  evaluateAndroidAssertion,
+  extractAndroidDeterministic,
+} from './assertion';
+import {
   AndroidDiagnosticsRecorder,
   type AndroidDiagnosticsSnapshot,
   type AndroidForegroundState,
@@ -640,7 +648,11 @@ export class AndroidDevice implements AbstractInterface {
     if (actionName === 'RunAdbShell' || actionName === 'AndroidSetPermission') {
       return 'adbShell';
     }
-    if (actionName === 'AndroidGetSystemState') {
+    if (
+      actionName === 'AndroidGetSystemState' ||
+      actionName === 'AndroidAssert' ||
+      actionName === 'AndroidExtract'
+    ) {
       return 'state';
     }
     if (actionName === 'Launch' || actionName === 'Terminate') {
@@ -1016,6 +1028,32 @@ ${Object.keys(size)
       (command) => this.runAdbShell(command),
       request,
     );
+  }
+
+  public async assertAndroid(
+    predicate: AndroidAssertionPredicate,
+  ): Promise<AndroidAssertionResult> {
+    return await evaluateAndroidAssertion(predicate, {
+      getUiTree: () => this.getElementsNodeTree(),
+      getSystemState: (request) => this.getAndroidSystemState(request),
+      getPermissions: (query) => this.getAndroidPermissions(query),
+      getNotifications: (request) => this.getAndroidNotifications(request),
+      runShell: (command) => this.runAdbShell(command),
+    });
+  }
+
+  public async extractAndroid(
+    request: AndroidExtractionRequest,
+  ): Promise<AndroidExtractionResult> {
+    return await extractAndroidDeterministic(request, {
+      getUiTree: () => this.getElementsNodeTree(),
+      getSystemState: (systemRequest) =>
+        this.getAndroidSystemState(systemRequest),
+      getPermissions: (query) => this.getAndroidPermissions(query),
+      getNotifications: (notificationRequest) =>
+        this.getAndroidNotifications(notificationRequest),
+      runShell: (command) => this.runAdbShell(command),
+    });
   }
 
   private getHelperOptions(): AndroidHelperDeviceOpt | null {
@@ -3285,6 +3323,170 @@ const androidSetPermissionParamSchema = z.object({
     .describe('Optional appops mode, defaults to allow/ignore by mode'),
 });
 
+const androidValueExpectationSchema = z.union([
+  z.string(),
+  z.object({
+    equals: z.string().optional(),
+    contains: z.string().optional(),
+    matches: z.string().optional(),
+    exists: z.boolean().optional(),
+    notEquals: z.string().optional(),
+    notContains: z.string().optional(),
+  }),
+]);
+
+const androidUiNodeQuerySchema = z.object({
+  text: androidValueExpectationSchema.optional(),
+  textContains: z.string().optional(),
+  contentDesc: androidValueExpectationSchema.optional(),
+  resourceId: androidValueExpectationSchema.optional(),
+  className: androidValueExpectationSchema.optional(),
+  packageName: androidValueExpectationSchema.optional(),
+  visibleOnly: z.boolean().optional(),
+  enabled: z.boolean().optional(),
+  checked: z.boolean().optional(),
+  selected: z.boolean().optional(),
+  clickable: z.boolean().optional(),
+  minMatches: z.number().int().nonnegative().optional(),
+  limit: z.number().int().positive().optional(),
+  includeBounds: z.boolean().optional(),
+});
+
+const androidAssertionPredicateSchema = z.object({
+  ui: z
+    .object({
+      anyText: z.array(z.string()).optional(),
+      allText: z.array(z.string()).optional(),
+      noneText: z.array(z.string()).optional(),
+      nodes: z.array(androidUiNodeQuerySchema).optional(),
+      visibleOnly: z.boolean().optional(),
+    })
+    .optional()
+    .describe('UI tree predicates evaluated without a vision model'),
+  foreground: z
+    .object({
+      packageName: androidValueExpectationSchema.optional(),
+      activity: androidValueExpectationSchema.optional(),
+      pageFingerprint: androidValueExpectationSchema.optional(),
+    })
+    .optional()
+    .describe('Foreground package/activity predicates from dumpsys/helper'),
+  settings: z
+    .array(
+      z.object({
+        namespace: z.enum(['system', 'secure', 'global']),
+        key: z.string(),
+        value: androidValueExpectationSchema.optional(),
+        exists: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+  properties: z
+    .array(
+      z.object({
+        key: z.string(),
+        value: androidValueExpectationSchema.optional(),
+        exists: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+  permissions: z
+    .array(
+      z.object({
+        packageName: z.string(),
+        permission: z.string(),
+        granted: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+  notifications: z
+    .array(
+      z.object({
+        packageName: androidValueExpectationSchema.optional(),
+        title: androidValueExpectationSchema.optional(),
+        text: androidValueExpectationSchema.optional(),
+        anyText: z.array(z.string()).optional(),
+      }),
+    )
+    .optional(),
+  logcat: z
+    .object({
+      command: z.string().optional(),
+      lines: z.number().int().positive().optional(),
+      contains: z.array(z.string()).optional(),
+      matches: z.array(z.string()).optional(),
+      excludes: z.array(z.string()).optional(),
+    })
+    .optional(),
+  shell: z
+    .array(
+      z.object({
+        command: z.string(),
+        value: androidValueExpectationSchema.optional(),
+        contains: z.array(z.string()).optional(),
+        matches: z.array(z.string()).optional(),
+        excludes: z.array(z.string()).optional(),
+      }),
+    )
+    .optional(),
+});
+
+const androidAssertParamSchema = z.object({
+  predicate: androidAssertionPredicateSchema.describe(
+    'Deterministic assertion predicate to evaluate before using visual AI',
+  ),
+  throwOnFailure: z
+    .boolean()
+    .optional()
+    .describe('Throw when predicate fails, default true'),
+});
+
+const androidExtractionParamSchema = z.object({
+  source: z
+    .enum([
+      'uiTree',
+      'system',
+      'permissions',
+      'notifications',
+      'logcat',
+      'shell',
+    ])
+    .default('uiTree')
+    .describe('Deterministic source to extract from'),
+  ui: androidUiNodeQuerySchema
+    .extend({
+      includeAttributes: z.boolean().optional(),
+    })
+    .optional(),
+  system: androidSystemStateParamSchema.optional(),
+  permissions: z
+    .object({
+      packageName: z.string(),
+      permissions: z.array(z.string()).optional(),
+      appOps: z.array(z.string()).optional(),
+    })
+    .optional(),
+  notifications: z
+    .object({
+      packageName: z.string().optional(),
+      limit: z.number().int().positive().optional(),
+      includeActions: z.boolean().optional(),
+    })
+    .optional(),
+  logcat: z
+    .object({
+      command: z.string().optional(),
+      lines: z.number().int().positive().optional(),
+      filter: z.string().optional(),
+    })
+    .optional(),
+  shell: z
+    .object({
+      command: z.string(),
+    })
+    .optional(),
+});
+
 type RunAdbShellParam = z.infer<typeof runAdbShellParamSchema>;
 type LaunchParam = z.infer<typeof launchParamSchema>;
 type TerminateParam = z.infer<typeof terminateParamSchema>;
@@ -3292,6 +3494,8 @@ type AndroidGetSystemStateParam = z.infer<typeof androidSystemStateParamSchema>;
 type AndroidSetPermissionParam = z.infer<
   typeof androidSetPermissionParamSchema
 >;
+type AndroidAssertParam = z.infer<typeof androidAssertParamSchema>;
+type AndroidExtractParam = z.infer<typeof androidExtractionParamSchema>;
 
 export type DeviceActionRunAdbShell = DeviceAction<RunAdbShellParam, string>;
 export type DeviceActionLaunch = DeviceAction<LaunchParam, void>;
@@ -3304,6 +3508,14 @@ export type DeviceActionAndroidSetPermission = DeviceAction<
   AndroidSetPermissionParam,
   string
 >;
+export type DeviceActionAndroidAssert = DeviceAction<
+  AndroidAssertParam,
+  string
+>;
+export type DeviceActionAndroidExtract = DeviceAction<
+  AndroidExtractParam,
+  string
+>;
 
 const createPlatformActions = (
   device: AndroidDevice,
@@ -3313,6 +3525,8 @@ const createPlatformActions = (
   Terminate: DeviceActionTerminate;
   AndroidGetSystemState: DeviceActionAndroidGetSystemState;
   AndroidSetPermission: DeviceActionAndroidSetPermission;
+  AndroidAssert: DeviceActionAndroidAssert;
+  AndroidExtract: DeviceActionAndroidExtract;
   AndroidBackButton: DeviceActionAndroidBackButton;
   AndroidHomeButton: DeviceActionAndroidHomeButton;
   AndroidRecentAppsButton: DeviceActionAndroidRecentAppsButton;
@@ -3404,6 +3618,65 @@ const createPlatformActions = (
       },
       call: async (param) => {
         const result = await device.setAndroidPermission(param);
+        return JSON.stringify(result, null, 2);
+      },
+    }),
+    AndroidAssert: defineAction<
+      typeof androidAssertParamSchema,
+      AndroidAssertParam,
+      string
+    >({
+      name: 'AndroidAssert',
+      description:
+        'Evaluate an Android assertion through deterministic sources such as UI tree, foreground state, settings provider, permissions, notifications, logcat, or shell. Prefer this over visual AI assertions when the expected state can be expressed as structured predicates.',
+      interfaceAlias: 'androidAssert',
+      paramSchema: androidAssertParamSchema,
+      sample: {
+        predicate: {
+          ui: {
+            allText: ['WLAN'],
+          },
+          foreground: {
+            packageName: 'com.android.settings',
+          },
+        },
+      },
+      call: async (param) => {
+        const result = await device.assertAndroid(
+          param.predicate as AndroidAssertionPredicate,
+        );
+        if (param.throwOnFailure !== false && !result.pass) {
+          const failed = result.checks
+            .filter((check) => !check.pass)
+            .map((check) => `${check.name}: ${check.reason ?? 'failed'}`)
+            .join('; ');
+          throw new Error(`Android deterministic assertion failed: ${failed}`);
+        }
+        return JSON.stringify(result, null, 2);
+      },
+    }),
+    AndroidExtract: defineAction<
+      typeof androidExtractionParamSchema,
+      AndroidExtractParam,
+      string
+    >({
+      name: 'AndroidExtract',
+      description:
+        'Extract Android state without visual AI from UI tree, system state, permissions, notifications, logcat, or shell. Use this for audit-friendly data extraction and verification.',
+      interfaceAlias: 'androidExtract',
+      paramSchema: androidExtractionParamSchema,
+      sample: {
+        source: 'uiTree',
+        ui: {
+          text: { contains: 'WLAN' },
+          includeBounds: true,
+          limit: 10,
+        },
+      },
+      call: async (param) => {
+        const result = await device.extractAndroid(
+          param as AndroidExtractionRequest,
+        );
         return JSON.stringify(result, null, 2);
       },
     }),

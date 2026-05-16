@@ -912,6 +912,8 @@ wrong-action rate after cache hit
 
 ### Phase G: Deterministic Assertions And Extraction
 
+状态：已完成第一版实现。Android runtime 新增 deterministic assertion/extraction 模块，支持通过 UI tree、foreground/system state、settings provider、system properties、permissions、notifications、logcat 和 shell/root 输出进行显式 predicate 验证；新增 `AndroidAssert` 和 `AndroidExtract` action，报告中会以 action 输出展示 `source`、`checks`、`predicate` 和提取结果，从而让断言来源可审计。当前这一版优先实现 Node 侧 provider 编排和 ADB/helper fallback，后续 helper APK 可以按相同 predicate 协议下沉到系统签名 APK 内部执行。
+
 交付：
 
 - assertion predicate cache。
